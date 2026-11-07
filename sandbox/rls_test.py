@@ -1,7 +1,8 @@
-"""Row-level-security test for the Route B sandbox.
+"""Row-level-security test for the Route B and Route B+ sandbox.
 
 MySQL has no native RLS, so franchise isolation rests on three things, and this
-test proves each one for every franchise account (poc_icla, poc_icch, poc_icau):
+test proves each one for every franchise account of Route B (poc_icla, poc_icch,
+poc_icau) and of Route B+ (pocplus_icla, pocplus_icch, pocplus_icau):
 
   A. Views (static): every view that reads a tenant table (one with an `entity`
      column) carries its own franchise literal and no other franchise's literal;
@@ -17,8 +18,15 @@ test proves each one for every franchise account (poc_icla, poc_icch, poc_icau):
      history, catalog of other schemas, view definitions, DDL, DML, temp tables,
      OUTFILE, LOAD_FILE, SET GLOBAL; user variables can't widen a view.
 
+Route B+ (pocplus_<ent>, built by `sandbox.py apply-plus`) holds no base-table reads at all: every view
+must resolve only to views of poc_<ent>, the same franchise's Route B mirror proven by A. Pass-through
+views must read exactly the poc_<ent> view of the same name with the same columns, every poc_<ent> view
+must have one, and every other view must be a metric_* view that reads tenant data (none is tenant-free).
+The B+ accounts get the same B/C/D checks plus: same resource limits as poc_<ent>, no table-level grants,
+and no read of the Route B schemas (their own franchise's included).
+
 Nothing is printed except counts and object names (no row data, no secrets).
-usage: python sandbox/rls_test.py          exit code 1 on any failure
+usage: python sandbox/rls_test.py [--only poc|plus]     exit code 1 on any failure (default: both)
 """
 from __future__ import annotations
 
@@ -64,7 +72,7 @@ def q(cn, sql: str, args=None):
 
 
 # ----------------------------------------------------------------------------- A. views
-def static_views(root) -> None:
+def load_tenant_tables(root) -> set[tuple[str, str]]:
     tenant_tables = {(s.lower(), t.lower()) for s, t in q(root,
         "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.COLUMNS WHERE COLUMN_NAME='entity' "
         "AND TABLE_SCHEMA IN ('icall_gold','icall_silver','ic_weekly_report')")}
@@ -74,6 +82,10 @@ def static_views(root) -> None:
             if code and code not in ALL_CODES:
                 ALL_CODES.append(code)
     print(f"     entity codes in data: {', '.join(sorted(ALL_CODES))}")
+    return tenant_tables
+
+
+def static_views(root, tenant_tables: set[tuple[str, str]]) -> None:
     for ent in FRANCHISES:
         schema = f"poc_{ent.lower()}"
         views = q(root, "SELECT TABLE_NAME, VIEW_DEFINITION, DEFINER, SECURITY_TYPE FROM information_schema.VIEWS "
@@ -112,20 +124,110 @@ def static_views(root) -> None:
         check(f"A {ent}: {len(views)} views filtered to own franchise, DEFINER root", not bad, "; ".join(bad))
 
 
-# ----------------------------------------------------------------------------- B. grants
-def grants(root) -> None:
+def static_views_plus(root, tenant_tables: set[tuple[str, str]]) -> None:
+    """Route B+: every pocplus_<ent> view resolves only to views of poc_<ent> (proven by A above)."""
     for ent in FRANCHISES:
-        u = f"poc_{ent.lower()}"
-        g = sorted(r[0] for r in q(root, f"SHOW GRANTS FOR '{u}'@'localhost'"))
+        base, schema = f"poc_{ent.lower()}", f"pocplus_{ent.lower()}"
+        views = q(root, "SELECT TABLE_NAME, VIEW_DEFINITION, DEFINER, SECURITY_TYPE FROM information_schema.VIEWS "
+                        "WHERE TABLE_SCHEMA=%s", (schema,))
+        if not views:
+            check(f"A {ent} B+: schema {schema} exists with views", False, "run `python sandbox/sandbox.py apply-plus`")
+            continue
+        base_views = {r[0].lower() for r in q(root, "SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%s",
+                                               (base,))}
+        # poc_<ent> views that read tenant data (directly or through other poc_<ent> views)
+        base_usage: dict[str, set[tuple[str, str]]] = {}
+        for v, s, t in q(root, "SELECT VIEW_NAME, TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEW_TABLE_USAGE "
+                               "WHERE VIEW_SCHEMA=%s", (base,)):
+            base_usage.setdefault(v.lower(), set()).add((s.lower(), t.lower()))
+
+        def resolve(usage: dict[str, set[tuple[str, str]]], own: str, start: set[tuple[str, str]]) -> set[tuple[str, str]]:
+            out, todo, seen = set(), list(start), set()
+            while todo:
+                s, t = todo.pop()
+                if (s, t) in seen:
+                    continue
+                seen.add((s, t))
+                if s == own:
+                    todo.extend(usage.get(t, ()))
+                else:
+                    out.add((s, t))
+            return out
+        base_tenant = {v for v in base_views if resolve(base_usage, base, base_usage.get(v, set())) & tenant_tables}
+        usage: dict[str, set[tuple[str, str]]] = {}
+        for v, s, t in q(root, "SELECT VIEW_NAME, TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEW_TABLE_USAGE "
+                               "WHERE VIEW_SCHEMA=%s", (schema,)):
+            usage.setdefault(v.lower(), set()).add((s.lower(), t.lower()))
+        cols = {}
+        for sch, t, c in q(root, "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS "
+                                 "WHERE TABLE_SCHEMA IN (%s, %s) ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
+                                 (base, schema)):
+            cols.setdefault((sch.lower(), t.lower()), []).append(c)
+        tables = q(root, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s "
+                         "AND TABLE_TYPE<>'VIEW'", (schema,))[0][0]
+        check(f"A {ent} B+: schema holds views only", tables == 0, f"{tables} base tables")
+        bad, names, n_metric = [], set(), 0
+        for name, defn, definer, sec in views:
+            n = name.lower()
+            names.add(n)
+            ext = resolve(usage, schema, usage.get(n, set()))
+            foreign = [c for c in ALL_CODES if c != ent and f"'{c}'" in defn]
+            if definer.lower() != "root@localhost" or sec != "DEFINER":
+                bad.append(f"{name}: definer {definer}/{sec}")
+            if foreign:
+                bad.append(f"{name}: other franchise literal {foreign}")
+            outside = sorted(f"{s}.{t}" for s, t in ext if s != base or t not in base_views)
+            if outside or not ext:
+                bad.append(f"{name}: reads outside the {ent} mirror {base}: {outside or 'nothing'}")
+            if n in base_views:      # pass-through
+                if ext != {(base, n)} or any(s == schema for s, _ in usage.get(n, set())):
+                    bad.append(f"{name}: pass-through must read exactly {base}.{n}")
+                if cols.get((schema, n)) != cols.get((base, n)):
+                    bad.append(f"{name}: columns differ from {base}.{n}")
+            else:                    # governed metric view
+                n_metric += 1
+                if not n.startswith("metric_"):
+                    bad.append(f"{name}: not a pass-through and not a metric_ view")
+                if not ({t for s, t in ext if s == base} & base_tenant) and n not in TENANT_FREE:
+                    bad.append(f"{name}: reads no tenant view (tenant-free view not on the reviewed list)")
+        missing = sorted(base_views - names)
+        if missing:
+            bad.append(f"no pass-through for {base}: {missing}")
+        check(f"A {ent} B+: {len(views)} views ({n_metric} metric) resolve only to {base}, DEFINER root", not bad,
+              "; ".join(bad))
+
+
+# ----------------------------------------------------------------------------- B. grants
+def grants(root, prefix: str = "poc") -> None:
+    tag = "" if prefix == "poc" else " B+"
+    for ent in FRANCHISES:
+        u = f"{prefix}_{ent.lower()}"
+        try:
+            g = sorted(r[0] for r in q(root, f"SHOW GRANTS FOR '{u}'@'localhost'"))
+        except mysql.connector.Error as e:
+            check(f"B {ent}{tag}: account {u} exists", False, str(e).splitlines()[0][:80])
+            continue
         want = sorted([f"GRANT USAGE ON *.* TO `{u}`@`localhost`", f"GRANT SELECT ON `{u}`.* TO `{u}`@`localhost`"])
-        check(f"B {ent}: grants are exactly USAGE + SELECT on own schema", g == want, "; ".join(g))
+        check(f"B {ent}{tag}: grants are exactly USAGE + SELECT on own schema", g == want, "; ".join(g))
+        if prefix != "poc":
+            lim = lambda user: q(root, "SELECT max_questions, max_updates, max_connections, max_user_connections "
+                                       "FROM mysql.user WHERE user=%s AND host='localhost'", (user,))
+            mine, ref = lim(u), lim(f"poc_{ent.lower()}")
+            check(f"B {ent}{tag}: resource limits equal poc_{ent.lower()}'s", bool(mine) and mine == ref,
+                  f"{mine} vs {ref}")
+    like = prefix.replace("_", "\\_")
     others = q(root, "SELECT DISTINCT GRANTEE, TABLE_SCHEMA FROM information_schema.SCHEMA_PRIVILEGES "
-                     "WHERE TABLE_SCHEMA LIKE 'poc\\_%'")
+                     f"WHERE TABLE_SCHEMA LIKE '{like}\\_%'")
     stray = [f"{g}->{s}" for g, s in others if g.strip("'").split("'@'")[0] != s]
-    check("B no account other than the owner (and root) can reach a poc schema", not stray, "; ".join(stray))
-    glob = q(root, "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE LIKE '''poc\\_%'")
+    check(f"B no account other than the owner (and root) can reach a {prefix} schema", not stray, "; ".join(stray))
+    glob = q(root, f"SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE LIKE '''{like}\\_%'")
     glob = [f"{g}:{p}" for g, p in glob if p != "USAGE"]
-    check("B franchise accounts hold no global privileges", not glob, "; ".join(glob))
+    check(f"B{tag} franchise accounts hold no global privileges", not glob, "; ".join(glob))
+    if prefix != "poc":
+        tbl = q(root, "SELECT GRANTEE, TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLE_PRIVILEGES "
+                      f"WHERE TABLE_SCHEMA LIKE '{like}\\_%' OR GRANTEE LIKE '''{like}\\_%'")
+        check(f"B{tag} no table-level grants on or for {prefix} schemas", not tbl,
+              "; ".join(f"{g}->{s}.{t}" for g, s, t in tbl))
 
 
 # ----------------------------------------------------------------------------- C. data
@@ -151,12 +253,11 @@ def foreign_ids(root) -> dict[str, set[str]]:
     return {e: {v for v in vs if len(owners[v]) == 1} for e, vs in ids.items()}
 
 
-def data_scan(root, accounts) -> None:
-    ids = foreign_ids(root)
-    print(f"     fingerprints: {sum(len(v) for v in ids.values())} unique Salesforce ids across {len(ids)} entities")
+def data_scan(accounts, ids: dict[str, set[str]], prefix: str = "poc") -> None:
     for ent in FRANCHISES:
         cn = accounts[ent]
-        schema = f"poc_{ent.lower()}"
+        schema = f"{prefix}_{ent.lower()}"
+        lbl = ent if prefix == "poc" else f"{ent} B+"
         foreign = set().union(*(v for e, v in ids.items() if e != ent))
         own = ids.get(ent, set())
         cols = q(cn, "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s",
@@ -175,17 +276,18 @@ def data_scan(root, accounts) -> None:
                 own_seen += len(vals & own)
                 if hit:
                     leaks.append(f"{t}.{c}: {len(hit)} foreign ids")
-        check(f"C {ent}: every entity column holds only {ent}", not ent_bad, "; ".join(ent_bad))
-        check(f"C {ent}: no other franchise's Salesforce id in {scanned} text columns",
+        check(f"C {lbl}: every entity column holds only {ent}", not ent_bad, "; ".join(ent_bad))
+        check(f"C {lbl}: no other franchise's Salesforce id in {scanned} text columns",
               not leaks and own_seen > 0, "; ".join(leaks) or f"{own_seen} own ids seen")
 
 
 # ----------------------------------------------------------------------------- D. privilege probes
-def probes(accounts) -> None:
+def probes(accounts, prefix: str = "poc") -> None:
     for ent in FRANCHISES:
         cn = accounts[ent]
-        schema = f"poc_{ent.lower()}"
-        other = f"poc_{[e for e in FRANCHISES if e != ent][0].lower()}"
+        schema = f"{prefix}_{ent.lower()}"
+        other = f"{prefix}_{[e for e in FRANCHISES if e != ent][0].lower()}"
+        lbl = ent if prefix == "poc" else f"{ent} B+"
         must_fail = {
             "read base Gold table": "SELECT COUNT(*) FROM icall_gold.fact_sales",
             "read Silver": "SELECT COUNT(*) FROM icall_silver.silver_lead_status_history",
@@ -203,6 +305,13 @@ def probes(accounts) -> None:
             "write a file": f"SELECT 1 FROM `{schema}`.`dim_entity` INTO OUTFILE 'rls_probe.txt'",
             "create a function": f"CREATE FUNCTION `{schema}`.f() RETURNS INT DETERMINISTIC RETURN 1",
         }
+        if prefix != "poc":
+            must_fail.update({
+                "read own franchise Route B schema": f"SELECT COUNT(*) FROM `poc_{ent.lower()}`.`salesforce_data`",
+                "read other franchise Route B schema": f"SELECT COUNT(*) FROM `poc_{other[len(prefix) + 1:]}`.`leads`",
+                "update a metric view": f"UPDATE `{schema}`.`metric_sales` SET `amount` = 0",
+                "delete from a metric view": f"DELETE FROM `{schema}`.`metric_appointments_reported` LIMIT 1",
+            })
         failed_to_block = []
         for label, sql in must_fail.items():
             try:
@@ -210,37 +319,60 @@ def probes(accounts) -> None:
                 failed_to_block.append(label)
             except mysql.connector.Error:
                 pass
-        check(f"D {ent}: {len(must_fail)} forbidden operations all denied", not failed_to_block,
+        check(f"D {lbl}: {len(must_fail)} forbidden operations all denied", not failed_to_block,
               "NOT denied: " + ", ".join(failed_to_block))
         schemas = {r[0].lower() for r in q(cn, "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA")}
-        check(f"D {ent}: catalog shows no other data schema",
+        check(f"D {lbl}: catalog shows no other data schema",
               schemas <= {"information_schema", "performance_schema", schema}, ", ".join(sorted(schemas)))
         n = q(cn, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN "
                   "('information_schema','performance_schema', %s)", (schema,))[0][0]
-        check(f"D {ent}: catalog lists no tables outside own schema", n == 0, f"{n} visible")
+        check(f"D {lbl}: catalog lists no tables outside own schema", n == 0, f"{n} visible")
         defs = [r[0] for r in q(cn, "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%s",
                                 (schema,)) if r[0]]
-        check(f"D {ent}: view definitions are hidden (no SHOW VIEW)", not defs, f"{len(defs)} readable")
+        check(f"D {lbl}: view definitions are hidden (no SHOW VIEW)", not defs, f"{len(defs)} readable")
         lf = q(cn, "SELECT LOAD_FILE('C:/Windows/win.ini')")[0][0]
-        check(f"D {ent}: LOAD_FILE returns nothing", lf is None)
+        check(f"D {lbl}: LOAD_FILE returns nothing", lf is None)
         procs = q(cn, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER <> %s",
-                  (f"poc_{ent.lower()}",))[0][0]
-        check(f"D {ent}: process list shows no other sessions", procs == 0, f"{procs} visible")
+                  (f"{prefix}_{ent.lower()}",))[0][0]
+        check(f"D {lbl}: process list shows no other sessions", procs == 0, f"{procs} visible")
         q(cn, "SET @e := 'ICSE'")
         widened = q(cn, f"SELECT COUNT(*) FROM `{schema}`.`salesforce_data` "
                         "WHERE CAST(`entity` AS BINARY) = CAST(@e AS BINARY)")[0][0]
-        check(f"D {ent}: a user variable can't widen a view", widened == 0, f"{widened} rows")
+        check(f"D {lbl}: a user variable can't widen a view", widened == 0, f"{widened} rows")
 
 
 def main() -> int:
+    only = None
+    if len(sys.argv) > 1:
+        if len(sys.argv) != 3 or sys.argv[1] != "--only" or sys.argv[2] not in ("poc", "plus"):
+            sys.exit(__doc__)
+        only = sys.argv[2]
+    sets = [p for p in ("poc", "pocplus") if only is None or p == {"poc": "poc", "plus": "pocplus"}[only]]
     root = connect("root", env("SANDBOX_ROOT_PASSWORD"))
-    accounts = {e: connect(f"poc_{e.lower()}", env(f"SANDBOX_{e}_PASSWORD")) for e in FRANCHISES}
-    static_views(root)
-    grants(root)
-    data_scan(root, accounts)
-    probes(accounts)
+    tenant_tables = load_tenant_tables(root)
+    accounts: dict[str, dict] = {}
+    for prefix in sets:
+        suffix = "" if prefix == "poc" else "_PLUS"
+        try:
+            accounts[prefix] = {e: connect(f"{prefix}_{e.lower()}", env(f"SANDBOX_{e}{suffix}_PASSWORD"))
+                                for e in FRANCHISES}
+        except (KeyError, mysql.connector.Error) as e:
+            check(f"{prefix} accounts can sign in", False,
+                  f"{type(e).__name__} (run `python sandbox/sandbox.py {'apply-views' if prefix == 'poc' else 'apply-plus'}`)")
+    if "poc" in sets:
+        static_views(root, tenant_tables)
+    if "pocplus" in sets:
+        static_views_plus(root, tenant_tables)
+    for prefix in sets:
+        grants(root, prefix)
+    if accounts:
+        ids = foreign_ids(root)
+        print(f"     fingerprints: {sum(len(v) for v in ids.values())} unique Salesforce ids across {len(ids)} entities")
+        for prefix, acc in accounts.items():
+            data_scan(acc, ids, prefix)
+            probes(acc, prefix)
     fails = [r for r in results if not r[1]]
-    print(f"\nRLS test: {len(results) - len(fails)}/{len(results)} checks passed")
+    print(f"\nRLS test ({' + '.join(sets)}): {len(results) - len(fails)}/{len(results)} checks passed")
     return 1 if fails else 0
 
 

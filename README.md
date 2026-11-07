@@ -13,8 +13,9 @@ Franchises in scope: ICLA, ICCH, ICAU.
 
 | Path | What |
 |---|---|
-| `sandbox/sandbox.py` | Second MySQL 8.0 instance on 127.0.0.1:3307: `init`, `start`, `stop`, `status`, `refresh` (read-only dump of production → restore), `apply-views`, `probe` (isolation check), `purge` |
+| `sandbox/sandbox.py` | Second MySQL 8.0 instance on 127.0.0.1:3307: `init`, `start`, `stop`, `status`, `refresh` (read-only dump of production → restore), `apply-views`, `apply-plus` (arm B+ schemas and accounts only), `probe` (isolation check), `purge` |
 | `sandbox/views/` | View templates: one schema `poc_<ent>` per franchise mirroring the Power BI tables, plus `SCHEMA.md` and `PARITY_NOTES.md` |
+| `sandbox/views_plus/` | Arm B+: governed metric views (`metric_sales`, `metric_closing_daily`, `metric_appointments_reported`, `metric_designers`) in schemas `pocplus_<ent>`, next to pass-through copies of every `poc_<ent>` view; `METRIC_VIEWS.md` (also the B+ prompt section) and `PARITY.md` |
 | `bot/` | Standalone TypeScript runner: the production chatbot loop with a pluggable `query_dax` / `query_sql` tool per arm |
 | `harness/` | Gold set, runner, scorer, statistics (Python) |
 | `PREREGISTRATION.md` | The frozen evaluation plan and decision rule |
@@ -36,7 +37,9 @@ Route A gets franchise isolation for free: each franchise has its own Power BI s
 | Privileges | Through each account these all fail or return nothing:<br>• reads: base schemas, other franchise schemas, `mysql.*`, statement history, the catalog of other schemas, view definitions, other sessions, `LOAD_FILE`<br>• writes: DDL, DML, temporary tables, `OUTFILE`, `SET GLOBAL`<br>A user variable can't widen a view. | `rls_test.py` D |
 | Bot | The SQL tool picks the account from the franchise the signed-in caller supplies, never from model output. Each franchise has its own connection pool. A parser-based gate allows a single SELECT/WITH over that franchise's views only, with no hints, variables, `OUTFILE` or sleep functions. Each session sets a time limit, read-only mode and `ANSI_QUOTES`. | `bot/test/gate.test.ts`, safety battery |
 
-Run `python sandbox/rls_test.py` after every `refresh` or `apply-views`. Any failure blocks scored runs.
+Arm B+ adds schemas `pocplus_icla`, `pocplus_icch`, `pocplus_icau` and one SELECT-only account each (same limits, no `SHOW VIEW`). Their views hold no base-table reads: each is either a pass-through of the same-named `poc_<ent>` view or a `metric_*` view over those pass-throughs, so every row still comes through the `entity` filter proven above. The B+ accounts cannot read any `poc_*` schema directly. `rls_test.py` runs all four check groups on both families (`--only poc` / `--only plus` for one).
+
+Run `python sandbox/rls_test.py` after every `refresh`, `apply-views` or `apply-plus`, and re-run `apply-plus` after `apply-views`. Any failure blocks scored runs.
 
 ## Quick start
 
@@ -44,6 +47,7 @@ Run `python sandbox/rls_test.py` after every `refresh` or `apply-views`. Any fai
 python sandbox/sandbox.py start          # bring the sandbox up
 python sandbox/sandbox.py refresh        # fresh snapshot of production (read-only dump)
 python sandbox/sandbox.py apply-views    # (re)build per-franchise views + accounts
+python sandbox/sandbox.py apply-plus     # (re)build arm B+ schemas pocplus_<ent> + accounts (after apply-views)
 python sandbox/sandbox.py probe          # check each account sees only its own schema
 python sandbox/sandbox.py stop           # stop when not in use
 python sandbox/sandbox.py purge          # delete datadir, dumps and sandbox passwords

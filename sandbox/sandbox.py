@@ -10,13 +10,18 @@ Production is only ever READ (mysqldump --single-transaction). Nothing here writ
 Secrets are never printed: production creds come from ../config/credentials.env,
 sandbox creds are generated into daxvssql/.env.
 
-usage: python sandbox/sandbox.py <init|start|stop|status|refresh|apply-views|probe|purge>
+Arm B+ adds per-franchise schemas pocplus_<ent> (pass-through views over poc_<ent> plus the governed
+metric views in sandbox/views_plus/) and one SELECT-only account per franchise: `apply-plus`. It never
+drops or alters a poc_* schema or account.
+
+usage: python sandbox/sandbox.py <init|start|stop|status|refresh|apply-views|apply-plus|probe|purge>
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -278,6 +283,137 @@ def cmd_apply_views() -> None:
         print(f"{ent}: schema {schema} with {n} views; account {user} (SELECT only, password in .env)")
 
 
+# ----------------------------------------------------------------------------- arm B+ (pocplus_*)
+PLUS_DIR = ROOT / "sandbox" / "views_plus"
+PRIVATE_NAMES = ROOT / "private" / "rules_names.md"
+# Decision 2026-11-07 (rules/business_rules.md section 4): ICLA sells on created date, ICCH and ICAU on sold date.
+SALES_DATE_COLUMN = {"ICLA": "`Created Date`", "ICCH": "`Original Project Sold Date`", "ICAU": "`Original Project Sold Date`"}
+SALES_BASIS_LABEL = {"ICLA": "created date", "ICCH": "sold date", "ICAU": "sold date"}
+# Same resource limits as the Route B accounts (cmd_apply_views); rls_test.py compares them.
+PLUS_ACCOUNT_LIMITS = "WITH MAX_QUERIES_PER_HOUR 3000 MAX_USER_CONNECTIONS 4"
+
+
+def plus_names(ent: str) -> tuple[str, str, str]:
+    """(Route B mirror schema, B+ schema, B+ account). Hard guard: B+ only ever touches pocplus_* objects."""
+    base, schema = f"poc_{ent.lower()}", f"pocplus_{ent.lower()}"
+    if ent not in FRANCHISES or not schema.startswith("pocplus_") or schema == base:
+        sys.exit(f"refusing: unexpected franchise {ent!r}")
+    return base, schema, schema
+
+
+def icla_excluded_staff_sql() -> str:
+    """ICLA's excluded office-staff list as a SQL list, read from the gitignored private file at apply time.
+    Same parse as bot/src/prompts/rules.ts parseStaffList. Never printed, never written to disk."""
+    if not PRIVATE_NAMES.exists():
+        sys.exit(f"missing {PRIVATE_NAMES} (ICLA appointment rule needs it); nothing applied for ICLA")
+    lines = PRIVATE_NAMES.read_text(encoding="utf-8").replace("\r\n", "\n").split("\n")
+    start = next((i for i, l in enumerate(lines) if re.match(r"^##\s+`?\{ICLA_EXCLUDED_STAFF\}`?", l)), None)
+    names: list[str] = []
+    if start is not None:
+        for l in lines[start + 1:]:
+            if re.match(r"^##\s", l):
+                break
+            m = re.match(r"^\d+\.\s+(.+?)\s*$", l)
+            if m:
+                names.append(m.group(1))
+    if not names:
+        sys.exit(f"no names under {{ICLA_EXCLUDED_STAFF}} in {PRIVATE_NAMES}; nothing applied for ICLA")
+    return ", ".join("'" + n.replace("\\", "\\\\").replace("'", "''") + "'" for n in names)
+
+
+def sb_mysql_stdin(sql: str, db: str | None = None) -> None:
+    """Run SQL as the sandbox administrator through stdin (keeps passwords and names off the command line).
+    Error text is trimmed before the `near '...'` part so a failure cannot echo template values."""
+    cmd = [str(BIN / "mysql.exe"), "-h", "127.0.0.1", "-P", str(PORT), "-u", "root", "--default-character-set=utf8mb4"]
+    if db:
+        cmd += ["-D", db]
+    p = subprocess.run(cmd, input=sql.encode("utf-8"), capture_output=True,
+                       env={**os.environ, "MYSQL_PWD": sandbox_secret("SANDBOX_ROOT_PASSWORD")})
+    if p.returncode != 0:
+        msg = p.stderr.decode(errors="replace").strip().splitlines()
+        raise RuntimeError(re.sub(r"\s+near '.*$", " (near ... trimmed)", msg[-1] if msg else "mysql failed"))
+
+
+def plus_template_sql(t: Path, ent: str, schema: str) -> str:
+    sql = t.read_text(encoding="utf-8")
+    values = {"ENT": ent, "SCHEMA": schema, "SALES_DATE": SALES_DATE_COLUMN[ent], "SALES_BASIS": SALES_BASIS_LABEL[ent]}
+    if "{ICLA_EXCLUDED_STAFF_SQL}" in sql:
+        if ent != "ICLA":
+            sys.exit(f"{t.name}: the ICLA staff list may only be used in an ICLA-only template")
+        values["ICLA_EXCLUDED_STAFF_SQL"] = icla_excluded_staff_sql()
+    sql = re.sub(r"\{([A-Z][A-Z_]*)\}", lambda m: values.get(m.group(1), m.group(0)), sql)
+    left = sorted(set(re.findall(r"\{([A-Z][A-Z_]*)\}", sql)))
+    if left:
+        sys.exit(f"{t.name}: unfilled placeholders {left} for {ent}")
+    return sql
+
+
+def cmd_apply_plus() -> None:
+    """Arm B+: (re)create ONLY the pocplus_<ent> schemas, their views and the pocplus_<ent> accounts.
+
+    Per franchise:
+      1. DROP + CREATE schema pocplus_<ent> (never a poc_* schema; see plus_names);
+      2. one pass-through SQL SECURITY DEFINER view per view of poc_<ent> (same name, same columns in order),
+         read from the catalog, so B+ sees everything B sees. Re-run apply-plus after every apply-views;
+      3. the metric views from sandbox/views_plus/*.sql in name order ({ENT}, {SCHEMA}, {SALES_DATE},
+         {SALES_BASIS}; {ICLA_EXCLUDED_STAFF_SQL} from private/rules_names.md for ICLA only). A file named
+         like `30_x.only_ICLA.sql` is applied to that franchise only;
+      4. account pocplus_<ent>: SELECT on its own pocplus_ schema only (no SHOW VIEW), Route B limits,
+         password SANDBOX_<ENT>_PLUS_PASSWORD in daxvssql/.env (never printed).
+    """
+    if not is_up():
+        sys.exit("sandbox is not running")
+    all_tmpls = sorted(PLUS_DIR.glob("*.sql"))
+    if not all_tmpls:
+        sys.exit("no view templates in sandbox/views_plus/")
+    for ent in FRANCHISES:
+        base, schema, user = plus_names(ent)
+        cols = sb_mysql("SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS c "
+                        f"WHERE TABLE_SCHEMA = '{base}' AND EXISTS (SELECT 1 FROM information_schema.VIEWS v "
+                        f"WHERE v.TABLE_SCHEMA = '{base}' AND v.TABLE_NAME = c.TABLE_NAME) "
+                        "ORDER BY TABLE_NAME, ORDINAL_POSITION;")
+        views: dict[str, list[str]] = {}
+        for line in cols.splitlines():
+            if line.strip():
+                v, c = line.split("\t", 1)
+                views.setdefault(v, []).append(c)
+        if not views:
+            sys.exit(f"{base} has no views: run apply-views first (nothing changed for {ent})")
+        q = lambda name: "`" + name.replace("`", "``") + "`"
+        stmts = [f"DROP DATABASE IF EXISTS {q(schema)};", f"CREATE DATABASE {q(schema)} CHARACTER SET utf8mb4;"]
+        for v, cl in views.items():
+            stmts.append(f"CREATE OR REPLACE SQL SECURITY DEFINER VIEW {q(schema)}.{q(v)} AS "
+                         f"SELECT {', '.join(q(c) for c in cl)} FROM {q(base)}.{q(v)};")
+        sb_mysql_stdin("\n".join(stmts))
+        tmpls = [t for t in all_tmpls if ".only_" not in t.name or t.name.endswith(f".only_{ent}.sql")]
+        for t in tmpls:
+            try:
+                sb_mysql_stdin(plus_template_sql(t, ent, schema), db=schema)
+            except RuntimeError as e:
+                sys.exit(f"{t.name} failed for {ent}: {e}")
+        pwd = sandbox_secret(f"SANDBOX_{ent}_PLUS_PASSWORD")
+        sb_mysql_stdin(
+            f"DROP USER IF EXISTS '{user}'@'localhost';\n"
+            f"CREATE USER '{user}'@'localhost' IDENTIFIED BY '{pwd}' {PLUS_ACCOUNT_LIMITS};\n"
+            # SELECT only, own B+ schema only: no SHOW VIEW, nothing on poc_* (the views run as their definer)
+            f"GRANT SELECT ON {q(schema)}.* TO '{user}'@'localhost';\n")
+        n = sb_mysql(f"SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA='{schema}';").strip()
+        metrics = sb_mysql(f"SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME) FROM information_schema.VIEWS "
+                           f"WHERE TABLE_SCHEMA='{schema}' AND TABLE_NAME LIKE 'metric\\_%';").strip()
+        print(f"{ent}: schema {schema} with {n} views ({len(views)} pass-through over {base}; metric: {metrics}); "
+              f"account {user} (SELECT only, password in .env)")
+    # the metric views must expose the same columns in every franchise
+    sig = sb_mysql("SELECT t.v, COUNT(DISTINCT t.sig), COUNT(*) FROM (SELECT TABLE_SCHEMA AS s, TABLE_NAME AS v, "
+                   "GROUP_CONCAT(CONCAT(COLUMN_NAME, ':', DATA_TYPE) ORDER BY ORDINAL_POSITION) AS sig "
+                   "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA LIKE 'pocplus\\_%' AND TABLE_NAME LIKE 'metric\\_%' "
+                   "GROUP BY TABLE_SCHEMA, TABLE_NAME) AS t GROUP BY t.v;")
+    rows = [line.split("\t") for line in sig.splitlines() if line.strip()]
+    drift = [v for v, nsig, nschema in rows if nsig != "1" or nschema != str(len(FRANCHISES))]
+    if drift:
+        sys.exit(f"metric views differ in columns between franchises (or are missing in one): {', '.join(drift)}")
+    print(f"metric views identical in columns across {len(FRANCHISES)} franchises: {', '.join(sorted(r[0] for r in rows))}")
+
+
 def cmd_probe() -> None:
     """Isolation smoke test: each franchise account sees only its own schema."""
     for ent in FRANCHISES:
@@ -317,7 +453,8 @@ def cmd_purge() -> None:
 
 
 COMMANDS = {"init": cmd_init, "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
-            "refresh": cmd_refresh, "apply-views": cmd_apply_views, "probe": cmd_probe, "purge": cmd_purge}
+            "refresh": cmd_refresh, "apply-views": cmd_apply_views, "apply-plus": cmd_apply_plus,
+            "probe": cmd_probe, "purge": cmd_purge}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
