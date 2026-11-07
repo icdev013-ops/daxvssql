@@ -270,7 +270,9 @@ def cmd_apply_views() -> None:
             f"DROP USER IF EXISTS '{user}'@'localhost';"
             f"CREATE USER '{user}'@'localhost' IDENTIFIED BY '{pwd}' "
             f"WITH MAX_QUERIES_PER_HOUR 3000 MAX_USER_CONNECTIONS 4;"
-            f"GRANT SELECT, SHOW VIEW ON `{schema}`.* TO '{user}'@'localhost';"
+            # SELECT only: no SHOW VIEW, so Route B can't read the view definitions
+            # (Route A can't see Power Query either; keeps the arms symmetric)
+            f"GRANT SELECT ON `{schema}`.* TO '{user}'@'localhost';"
         )
         n = sb_mysql(f"SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA='{schema}';").strip()
         print(f"{ent}: schema {schema} with {n} views; account {user} (SELECT only, password in .env)")

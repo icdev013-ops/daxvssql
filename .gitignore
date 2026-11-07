@@ -34,3 +34,6 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 Thumbs.db
+
+# regenerable TMDL parse (python sandbox/views/tools/parse_tmdl.py)
+sandbox/views/tools/tmdl.json
