@@ -131,8 +131,8 @@ def cmd_judge(a) -> None:
     refs: dict[tuple[str, str], dict] = {}
     alts: dict[tuple[str, str], list] = {}
     for r in load_jsonl([a.refs]):
-        base = r["case_id"].split("#")[0]
-        if "#" in r["case_id"]:          # alternate reading of an ambiguous question
+        base = re.sub(r"#alt\d+", "", r["case_id"])   # "T001#alt2@ICAU" -> "T001@ICAU"
+        if "#alt" in r["case_id"]:       # alternate reading of an ambiguous question
             alts.setdefault((base, r["source"]), []).append(r)
         else:
             refs[(base, r["source"])] = r

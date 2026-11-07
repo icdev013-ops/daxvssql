@@ -16,7 +16,7 @@ REF = {"case_id": "T1@ICAU", "source": "sql", "columns": ["sold_count", "sold_am
 LIST_TPL = {"id": "T2", "answer_shape": "ranked_list", "result_columns": ["designer", "sold_amount"],
             "col_types": {"sold_amount": "currency"}, "label_column": "designer", "value_columns": ["sold_amount"],
             "top_k": 3, "order_by": {"column": "sold_amount"}}
-LIST_REF = {"rows": [["Ann", 300.0], ["Bob", 200.0], ["Cy", 100.0], ["Di", 50.0]]}
+LIST_REF = {"rows": [["dz-a", 300.0], ["dz-b", 200.0], ["dz-c", 100.0], ["dz-d", 50.0]]}
 
 
 def turn(answer, **kw):
@@ -50,16 +50,33 @@ class ScoreTests(unittest.TestCase):
 
     def test_ranked_list_from_viz(self):
         viz = {"type": "table", "columns": [{"name": "Designer"}, {"name": "Sold Amount"}],
-               "data": [{"Designer": "Ann", "Sold Amount": 300}, {"Designer": "Bob", "Sold Amount": 200.4},
-                        {"Designer": "Cy", "Sold Amount": 100}]}
+               "data": [{"Designer": "dz-a", "Sold Amount": 300}, {"Designer": "dz-b", "Sold Amount": 200.4},
+                        {"Designer": "dz-c", "Sold Amount": 100}]}
         a = "Top designers:\n\n```viz\n" + json.dumps(viz) + "\n```\n"
         self.assertEqual(score.score_turn(LIST_TPL, LIST_REF, turn(a))["verdict"], "pass")
 
     def test_ranked_list_markdown_wrong_order(self):
-        a = "| Designer | Sold |\n|---|---|\n| Bob | 200 |\n| Ann | 300 |\n| Cy | 100 |\n"
+        a = "| Designer | Sold |\n|---|---|\n| dz-b | 200 |\n| dz-a | 300 |\n| dz-c | 100 |\n"
         s = score.score_turn(LIST_TPL, LIST_REF, turn(a))
         self.assertEqual(s["verdict"], "fail")
         self.assertIn("order", s["detail"])
+
+    def test_ranked_list_prose_order_beats_unsorted_table(self):
+        # DAX TOPN returns rows unsorted: the table is out of order but the prose ranking is right
+        viz = {"columns": [{"name": "Designer"}, {"name": "Sold Amount"}],
+               "data": [{"Designer": "dz-c", "Sold Amount": 100}, {"Designer": "dz-a", "Sold Amount": 300},
+                        {"Designer": "dz-b", "Sold Amount": 200}]}
+        a = "1. **dz-a** $300\n2. **dz-b** $200\n3. **dz-c** $100\n\n```viz\n" + json.dumps(viz) + "\n```\n"
+        self.assertEqual(score.score_turn(LIST_TPL, LIST_REF, turn(a))["verdict"], "pass")
+
+    def test_alternate_reading_passes(self):
+        alt_tpl = dict(NUM_TPL, alternates=[{"label": "lead journey", "headline": ["sold_count"]}])
+        alt_ref = {"rows": [[666, 1.0]]}
+        s = score.score_with_alternates(alt_tpl, REF, turn("**666 leads** sold."), [(1, alt_ref)])
+        self.assertEqual(s["verdict"], "pass")
+        self.assertIn("alternate reading 1", s["detail"])
+        s2 = score.score_with_alternates(alt_tpl, REF, turn("**700 leads** sold."), [(1, alt_ref)])
+        self.assertEqual(s2["verdict"], "fail")
 
     def test_percent_display_rounding(self):
         tpl = {"answer_shape": "number", "result_columns": ["rate"], "col_types": {"rate": "percent"},

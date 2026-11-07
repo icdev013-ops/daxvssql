@@ -245,7 +245,14 @@ def score_list_like(tpl, ref, answer, shape) -> tuple[str, str, str]:
         if shape == "ranked_list" and ok_labels == len(ref_rows):
             ref_order = [norm_label(r[idx[lab]]) for r in ref_rows]
             seen = [k for k in order if k in ref_order]
-            if seen[: len(ref_order)] != ref_order and not ties_explain(tpl, ref_rows, idx, seen):
+            # the order the owner READS: first mention of each label in the prose (a DAX TOPN
+            # returns its rows unsorted, so the attached table can be in any order)
+            prose = strip_markers(answer).lower()
+            pos = {k: prose.find(k) for k in ref_order}
+            prose_seen = sorted((k for k in ref_order if pos[k] >= 0), key=lambda k: pos[k])
+            ok_order = any(s[: len(ref_order)] == ref_order or ties_explain(tpl, ref_rows, idx, s)
+                           for s in (seen, prose_seen) if len(s) >= len(ref_order))
+            if not ok_order:
                 problems.append("order differs")
         score = (ok_labels == len(ref_rows) and ok_vals == len(ref_rows) and not problems, problems)
         if best is None or (score[0] and not best[0]) or len(score[1]) < len(best[1]):
@@ -281,6 +288,24 @@ def raw_result_values(turn: dict) -> list[float]:
                 if f is not None:
                     vals.append(f)
     return vals
+
+
+ALT_OVERRIDES = ("result_columns", "col_types", "headline", "label_column", "value_columns", "top_k",
+                 "order_by", "answer_shape")
+
+
+def score_with_alternates(tpl: dict, ref: dict | None, turn: dict, alts: list[tuple[int, dict]]) -> dict:
+    """Primary reading first; if it fails, any listed alternate reading that passes makes it a pass."""
+    first = score_turn(tpl, ref, turn)
+    if first["verdict"] == "pass" or not alts:
+        return first
+    for n, aref in alts:
+        spec = (tpl.get("alternates") or [])[n - 1] if n - 1 < len(tpl.get("alternates") or []) else {}
+        atpl = {**tpl, **{k: spec[k] for k in ALT_OVERRIDES if k in spec}}
+        s = score_turn(atpl, aref, turn)
+        if s["verdict"] == "pass":
+            return {**s, "detail": f"alternate reading {n}: {spec.get('label', '')}"[:200]}
+    return first
 
 
 def score_turn(tpl: dict, ref: dict | None, turn: dict) -> dict:
@@ -323,7 +348,13 @@ def main() -> None:
     a = ap.parse_args()
     gold = yaml.safe_load(Path(a.gold).read_text(encoding="utf-8"))
     templates = {t["id"]: t for t in (gold.get("templates") if isinstance(gold, dict) else gold)}
-    refs = {(r["case_id"], r["source"]): r for r in load_jsonl(a.refs)}
+    refs, alts = {}, {}
+    for r in load_jsonl(a.refs):
+        m = re.match(r"^(.*?)#alt(\d+)(@.*)$", r["case_id"])
+        if m:   # "T001#alt2@ICAU" -> alternate 2 of case "T001@ICAU"
+            alts.setdefault((m.group(1) + m.group(3), r["source"]), []).append((int(m.group(2)), r))
+        else:
+            refs[(r["case_id"], r["source"])] = r
     out, counts = [], {}
     for turn in load_jsonl(a.runs):
         tid = turn.get("template_id") or str(turn.get("case_id", "")).split("@")[0]
@@ -331,7 +362,8 @@ def main() -> None:
         if tpl is None:
             continue
         src = "dax" if str(turn.get("arm", "")).upper().startswith("A") else "sql"
-        s = score_turn(tpl, refs.get((turn.get("case_id"), src)), turn)
+        key = (turn.get("case_id"), src)
+        s = score_with_alternates(tpl, refs.get(key), turn, sorted(alts.get(key, []), key=lambda x: x[0]))
         s["template_id"] = tid
         out.append(s)
         counts[(s["arm"], s["verdict"])] = counts.get((s["arm"], s["verdict"]), 0) + 1

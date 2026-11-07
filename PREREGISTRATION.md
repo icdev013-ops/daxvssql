@@ -92,3 +92,19 @@ Correctness, narration (right query, wrong number in the text) and presentation 
 ## Production guardrails
 
 The POC never: pushes to or deploys the chatbot repo; changes Vercel; edits the live Power BI models or workspace; pauses the pipeline; writes to Supabase (including `copilot_usage`) or resets the test account; writes to the production MySQL. It only reads production MySQL, through `mysqldump --single-transaction`.
+
+## Frozen prompts (end of phase 2, 2026-11-07)
+
+Route B's tuning pass on the Dev split found no B-specific failures (Dev: A 25/25, B 25/25, 0 failed SQL queries, B used 3 rounds on 2 turns vs A's 5). So B's prompt was frozen unchanged. From here on, prompts change only through a logged deviation. Hashes are SHA-256 prefixes at anchor 2026-11-07. The anchor date is filled into the rules, so another anchor changes only those date tokens.
+
+| Arm | Franchise | Round-0 prompt | Round-1+ prompt | Rules (rendered) | Tools |
+|---|---|---|---|---|---|
+| A | ICLA | `093aef212f4f5849` (101,517 chars) | `44590f729591541f` (155,891) | `4924aab8bd1fab27` | `fff40ec9bc7e68b1` |
+| A | ICCH | `cf627a144480992a` (100,138 chars) | `b229d352d75bcbec` (154,154) | `f0af4e0336d744fb` | `fff40ec9bc7e68b1` |
+| A | ICAU | `9ee8aded04f47522` (100,541 chars) | `62c865a29e7681fc` (154,428) | `f0af4e0336d744fb` | `fff40ec9bc7e68b1` |
+| B | ICLA | `ab16390127dd6089` (100,210 chars) | `8ae9764e06513a9f` (165,480) | `4f5d22bcc4f91ae8` | `651c2fc56f2f393b` |
+| B | ICCH | `e4b97dfc3e62b2ae` (98,869 chars) | `3fe6524d4d8b3f6c` (163,781) | `36d337954fb157cb` | `651c2fc56f2f393b` |
+| B | ICAU | `35a92232bcdde515` (99,283 chars) | `4b07e4e23bfa9c51` (164,066) | `36d337954fb157cb` | `651c2fc56f2f393b` |
+
+Vendored code: A0 `d1b6a70`, A and B `9ef5e4f` (SAAS repo). Model: `openai/gpt-6-luna` via OpenRouter. Judge: `google/gemini-3.1-pro-preview`.
+
