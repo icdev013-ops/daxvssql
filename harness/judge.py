@@ -81,6 +81,8 @@ def render_answer(answer: str) -> str:
         tables.append("TABLE SHOWN WITH THE ANSWER:\n" + " | ".join(cols) + "\n" +
                       "\n".join(" | ".join("" if x is None else str(x) for x in r) for r in rows))
     text = strip_markers(answer)
+    # a viz block cut off by the log cap has no closing fence: drop it (its column style can hint at the route)
+    text = re.sub(r"```viz[\s\S]*$", "[table truncated]", text)
     for rx, rep in NEUTRAL:
         text = rx.sub(rep, text)
     return text.strip() + ("\n\n" + "\n\n".join(tables) if tables else "")
@@ -124,6 +126,100 @@ def ask(sess: requests.Session, user: str) -> dict:
                 return out
         time.sleep(2 * (attempt + 1))
     return {"verdict": "unknown", "failure_class": "", "rationale": "judge call failed"}
+
+
+def build_packets(a) -> list[tuple[dict, str]]:
+    """(key, packet text) for every turn to judge: undecidable ones, or all with --all."""
+    gold = yaml.safe_load(Path(a.gold).read_text(encoding="utf-8"))
+    tpls = {t["id"]: t for t in (gold.get("templates") if isinstance(gold, dict) else gold)}
+    turns = {}
+    for f in a.runs:
+        for t in load_jsonl([f]):
+            turns[(t["case_id"], t["arm"], str(t.get("run")))] = t
+    refs: dict[tuple[str, str], dict] = {}
+    alts: dict[tuple[str, str], list] = {}
+    for f in a.refs:
+        for r in load_jsonl([f]):
+            base = re.sub(r"#[^@]+", "", r["case_id"])
+            if "#" in r["case_id"]:
+                alts.setdefault((base, r["source"]), []).append({**r, "label": re.search(r"#([^@]+)", r["case_id"]).group(1)})
+            else:
+                refs[(base, r["source"])] = r
+    out = []
+    for f in a.scored:
+        for s in load_jsonl([f]):
+            if not (s["verdict"] == "undecidable" or a.all):
+                continue
+            t = turns.get((s["case_id"], s["arm"], str(s.get("run"))))
+            if not t:
+                continue
+            tid = s.get("template_id") or s["case_id"].split("@")[0].split("~")[0]
+            tpl = tpls.get(tid, {})
+            src = "dax" if s["arm"].startswith("A") else "sql"
+            base = re.sub(r"~p\d+", "", s["case_id"])
+            q = t["question"] + (f"\n(In context this means: {tpl['resolved_question']})" if tpl.get("resolved_question") else "")
+            text = (f"QUESTION: {q}\n\n{rule_text(tpl)}\n\n{render_ref(refs.get((base, src)), alts.get((base, src), []))}"
+                    f"\n\nCHATBOT ANSWER:\n{render_answer(t.get('answer') or '')}")
+            key = {"case_id": s["case_id"], "template_id": tid, "arm": s["arm"], "run": s.get("run"),
+                   "franchise": s.get("franchise"), "layer1": s["verdict"]}
+            out.append((key, text))
+    return out
+
+
+def cmd_export(a) -> None:
+    """Blind packets for judge instances: shuffled, random ids, no arm or route words; key kept apart."""
+    import random
+    import secrets
+    rng = random.Random(a.seed)
+    items = build_packets(a)
+    if a.sample < 1:
+        items = rng.sample(items, max(1, round(a.sample * len(items))))
+    rng.shuffle(items)
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    key, shards = {}, [[] for _ in range(a.shards)]
+    for i, (k, text) in enumerate(items):
+        pid = secrets.token_hex(4)
+        key[pid] = k
+        shards[i % a.shards].append({"pid": pid, "packet": text})
+    for n, sh in enumerate(shards, 1):
+        (out / f"{a.name}_shard{n}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in sh), encoding="utf-8")
+    (out / f"{a.name}_KEY.json").write_text(json.dumps(key, indent=1), encoding="utf-8")
+    (out / "JUDGE_INSTRUCTIONS.md").write_text(SYSTEM + "\n\nWrite one JSON line per packet: "
+                                               '{"pid": "<pid>", "verdict": ..., "failure_class": ..., "rationale": ...}\n',
+                                               encoding="utf-8")
+    print(f"{len(items)} packets in {a.shards} shard(s) under {out} (key: {a.name}_KEY.json, never give it to a judge)")
+
+
+def cmd_import(a) -> None:
+    key = json.loads(Path(a.key).read_text(encoding="utf-8"))
+    rows, seen = [], set()
+    for f in a.verdicts:
+        for v in load_jsonl([f]):
+            k = key.get(v.get("pid"))
+            if not k or v.get("pid") in seen:
+                continue
+            seen.add(v["pid"])
+            verdict = v.get("verdict") if v.get("verdict") in ("pass", "fail", "unknown") else "unknown"
+            rows.append({**k, "verdict": verdict, "failure_class": v.get("failure_class") or "",
+                         "rationale": v.get("rationale", ""), "judge_model": a.judge_model})
+    missing = set(key) - seen
+    Path(a.out).write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    print(f"imported {len(rows)} verdicts; {len(missing)} packet(s) without a verdict")
+    print(Counter((r["arm"], r["verdict"]) for r in rows))
+
+
+def cmd_agree(a) -> None:
+    """Test-retest reliability: two independent judging passes on the same turns."""
+    x = {(r["case_id"], r["arm"], str(r["run"])): r["verdict"] for r in load_jsonl([a.a])}
+    y = {(r["case_id"], r["arm"], str(r["run"])): r["verdict"] for r in load_jsonl([a.b])}
+    common = sorted(set(x) & set(y))
+    xs, ys = [x[c] for c in common], [y[c] for c in common]
+    agree = sum(p == q for p, q in zip(xs, ys))
+    print(f"common {len(common)}  agreement {agree / max(len(common), 1):.1%}  kappa {kappa(xs, ys):.3f}")
+    for arm in sorted({c[1] for c in common}):
+        sub = [c for c in common if c[1] == arm]
+        print(f"  {arm}: {len(sub)} turns, agreement {sum(x[c] == y[c] for c in sub) / len(sub):.1%}")
 
 
 def cmd_judge(a) -> None:
@@ -224,6 +320,25 @@ def main() -> None:
     for f in ("--scored", "--runs", "--refs", "--gold", "--out"):
         j.add_argument(f, required=True)
     j.add_argument("--all", action="store_true", help="judge every turn, not only undecidable ones (for calibration)")
+    e = sub.add_parser("export")
+    e.add_argument("--scored", nargs="+", required=True)
+    e.add_argument("--runs", nargs="+", required=True)
+    e.add_argument("--refs", nargs="+", required=True)
+    e.add_argument("--gold", required=True)
+    e.add_argument("--out-dir", required=True)
+    e.add_argument("--name", default="judge")
+    e.add_argument("--shards", type=int, default=4)
+    e.add_argument("--sample", type=float, default=1.0, help="fraction of packets (e.g. 0.2 for the retest pass)")
+    e.add_argument("--seed", type=int, default=11)
+    e.add_argument("--all", action="store_true")
+    im = sub.add_parser("import")
+    im.add_argument("--key", required=True)
+    im.add_argument("--verdicts", nargs="+", required=True)
+    im.add_argument("--out", required=True)
+    im.add_argument("--judge-model", default="claude-opus-5-5 (blind judge instances)")
+    ag = sub.add_parser("agree")
+    ag.add_argument("--a", required=True)
+    ag.add_argument("--b", required=True)
     k = sub.add_parser("kappa")
     k.add_argument("--judged", required=True)
     k.add_argument("--labels", required=True)
@@ -232,7 +347,8 @@ def main() -> None:
     m.add_argument("--labels")
     m.add_argument("--out", required=True)
     a = ap.parse_args()
-    {"judge": cmd_judge, "kappa": cmd_kappa, "merge": cmd_merge}[a.cmd](a)
+    {"judge": cmd_judge, "kappa": cmd_kappa, "merge": cmd_merge, "export": cmd_export, "import": cmd_import,
+     "agree": cmd_agree}[a.cmd](a)
 
 
 if __name__ == "__main__":
