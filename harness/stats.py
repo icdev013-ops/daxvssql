@@ -256,9 +256,10 @@ def main():
         if sp != "test" or not p:
             continue
         per_type = {}
-        tags = sorted({tag for t in tpls.values() for tag in (t.get("tags") or [])})
+        tags = sorted({tag for t in tpls.values() for tag in (t.get("types") or t.get("tags") or [])})
         for tag in tags:
-            cases = [c for c in pa if tag in ((tpls.get(pa[c]["template"]) or {}).get("tags") or [])]
+            cases = [c for c in pa if tag in ((tpls.get(pa[c]["template"]) or {}).get("types")
+                                               or (tpls.get(pa[c]["template"]) or {}).get("tags") or [])]
             per_type[tag] = paired(pa, pb, cases=cases, seed=a.seed)
         adj = holm({t: r["mcnemar_p"] for t, r in per_type.items() if r and t in PREDECLARED_B})
         for t, r in per_type.items():

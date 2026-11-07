@@ -41,6 +41,10 @@ const Case = z.object({
   anchor: z.string().optional(),
   history: z.array(Turn).optional(),
   arm: z.string().optional(),
+  /** Multi-turn: cases sharing `conv` run in `turn` order on one worker, each turn seeing this
+   *  arm's OWN earlier answers in the conversation as history (as a real chat would). */
+  conv: z.string().optional(),
+  turn: z.number().int().optional(),
 });
 type CaseT = z.infer<typeof Case>;
 
@@ -143,25 +147,44 @@ async function main() {
   const log = new RunLog(runId);
   console.error(`run ${runId}: ${cases.length} case(s), arm ${armArg}, concurrency ${concurrency} -> ${path.relative(process.cwd(), log.file) || log.file}`);
 
+  // Units of work: a lone case, or a whole conversation (same conv + franchise) in turn order.
+  const runIndex = args["run-index"] !== undefined ? Number(args["run-index"]) : undefined;
+  const units: { c: CaseT; i: number }[][] = [];
+  const convs = new Map<string, { c: CaseT; i: number }[]>();
+  cases.forEach((c, i) => {
+    if (!c.conv) { units.push([{ c, i }]); return; }
+    const key = `${c.conv}@${c.franchise ?? defaultFranchise}`;
+    if (!convs.has(key)) { const u: { c: CaseT; i: number }[] = []; convs.set(key, u); units.push(u); }
+    convs.get(key)!.push({ c, i });
+  });
+  for (const u of convs.values()) u.sort((a, b) => (a.c.turn ?? 0) - (b.c.turn ?? 0));
+
   let next = 0, failed = 0;
   const worker = async () => {
     for (;;) {
-      const i = next++;
-      if (i >= cases.length) return;
-      const c = cases[i];
-      try {
-        const arm = await getArm(c.arm ?? armArg);
-        const rec = await runTurn({
-          arm, franchise: (c.franchise ?? defaultFranchise)!, anchor: (c.anchor ?? defaultAnchor)!,
-          question: c.question, history: (c.history ?? []) as ChatTurn[], runId, caseId: c.id ?? `case-${i + 1}`,
-          embeddings: !!args.embeddings,
-        });
-        await log.append(rec);
-        console.log(args.json ? JSON.stringify(rec, null, 2) : summary(rec));
-        if (rec.errors.length) failed++;
-      } catch (e) {
-        failed++;
-        console.error(`case ${c.id ?? i + 1} failed: ${e instanceof Error ? e.message : String(e)}`);
+      const u = next++;
+      if (u >= units.length) return;
+      let convHistory: ChatTurn[] | null = null;
+      for (const { c, i } of units[u]) {
+        try {
+          const arm = await getArm(c.arm ?? armArg);
+          const history: ChatTurn[] = convHistory ?? ((c.history ?? []) as ChatTurn[]);
+          const rec = await runTurn({
+            arm, franchise: (c.franchise ?? defaultFranchise)!, anchor: (c.anchor ?? defaultAnchor)!,
+            question: c.question, history, runId, caseId: c.id ?? `case-${i + 1}`,
+            embeddings: !!args.embeddings,
+          });
+          const logged = { ...rec, ...(runIndex !== undefined ? { run: runIndex } : {}),
+            ...(c.conv ? { conv: c.conv, turn: c.turn } : {}) };
+          await log.append(logged as TurnRecord);
+          console.log(args.json ? JSON.stringify(rec, null, 2) : summary(rec));
+          if (rec.errors.length) failed++;
+          if (c.conv) convHistory = [...history, { role: "user", content: c.question }, { role: "assistant", content: rec.answer }];
+        } catch (e) {
+          failed++;
+          console.error(`case ${c.id ?? i + 1} failed: ${e instanceof Error ? e.message : String(e)}`);
+          if (c.conv) break;   // a broken conversation can't continue meaningfully
+        }
       }
     }
   };

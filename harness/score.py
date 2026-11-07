@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
 # ----------------------------------------------------------------------------- text cleanup
 LOG_MARKER = re.compile(r"\[[A-Z]+_LOG_R\d+:[^\n]*\]")
 VIZ_BLOCK = re.compile(r"```viz\s*\n(.*?)```", re.S)
-LOOKUP = re.compile(r"\[Looking up live data…\]")
+LOOKUP = re.compile(r"\[Looking up live data…\]|\[CONTINUE_AVAILABLE\]")
 ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+Z?)?\b")
 YEAR_MONTH = re.compile(r"\b\d{4}-\d{2}\b")
 REFUSAL = re.compile(r"\b(i (?:can(?:no|')t|am unable|don't have|do not have)|not (?:available|possible)|"
@@ -273,8 +273,8 @@ def ties_explain(tpl, ref_rows, idx, seen) -> bool:
 def raw_result_values(turn: dict) -> list[float]:
     vals = []
     for q in turn.get("queries") or []:
-        res = q.get("result") or {}
-        for row in res.get("rows") or []:
+        rows = q.get("rows") if q.get("rows") is not None else (q.get("result") or {}).get("rows")
+        for row in rows or []:
             cells = row.values() if isinstance(row, dict) else row
             for c in cells:
                 f = to_float(c) if not isinstance(c, str) or re.match(r"^-?[\d,.$%]+$", c or "") else None
@@ -285,10 +285,12 @@ def raw_result_values(turn: dict) -> list[float]:
 
 def score_turn(tpl: dict, ref: dict | None, turn: dict) -> dict:
     answer = turn.get("answer") or ""
-    base = {k: turn.get(k) for k in ("case_id", "template_id", "arm", "run", "franchise")}
-    if turn.get("error") or not answer.strip():
-        cls = "timeout" if "timeout" in str(turn.get("error", "")).lower() else "execution_error"
-        return {**base, "verdict": "fail", "failure_class": cls, "loud": True, "detail": str(turn.get("error"))[:200]}
+    base = {k: turn.get(k) for k in ("case_id", "template_id", "arm", "run", "franchise", "conv", "turn")}
+    errs = turn.get("error") or "; ".join(turn.get("errors") or [])
+    visible = turn.get("answer_visible", strip_markers(answer))
+    if not str(visible).strip():
+        cls = "timeout" if "timeout" in str(errs).lower() or "stall" in str(errs).lower() else "execution_error"
+        return {**base, "verdict": "fail", "failure_class": cls, "loud": True, "detail": str(errs)[:200]}
     shape = tpl.get("answer_shape", "number")
     if shape == "rubric":
         return {**base, "verdict": "undecidable", "failure_class": "", "loud": False, "detail": "rubric case: judge"}

@@ -1,0 +1,167 @@
+"""Run a scored batch end to end (PREREGISTRATION.md "Data protocol").
+
+  1. refs (pre):  gold/validate.py runs every reference SQL (sandbox) and reference DAX (dataset)
+                  for the chosen cases and anchor -> gold/private/refs_<anchor>_<tag>.jsonl
+  2. cases:       resolved questions from that calibration file -> runs/<tag>_cases.jsonl
+                  (multi-turn templates keep conv/turn so each arm carries its own history)
+  3. arms:        bot CLI per run index, arm order alternating between runs (A,B then B,A ...)
+  4. refs (post): the same references again; a case whose reference moved between pre and post
+                  on the source an arm reads is set aside (data drift, not a route error)
+  5. score + stats
+
+usage (from the daxvssql folder):
+  python harness/run.py --anchor 2026-11-07 --tag pilot1 --splits test --sample 30 --arms A,B --runs 1
+  python harness/run.py --anchor 2026-11-08 --tag full1 --splits test,dev,robustness,multiturn,why_forecast,unanswerable,ambiguity --arms A,B --runs 3
+  python harness/run.py --tag pilot1 --score-only          # re-score an existing batch
+
+Everything this writes holds real franchise data and lives in gitignored folders.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import shutil
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+GOLD = ROOT / "gold"
+PRIV = GOLD / "private"
+RUNS = ROOT / "runs"
+BOT = ROOT / "bot"
+NPX = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
+SOURCE = {"A": "dax", "A0": "dax", "B": "sql", "B+": "sql"}
+
+
+def sh(cmd: list[str], cwd: Path = ROOT) -> None:
+    print("$", " ".join(cmd), flush=True)
+    r = subprocess.run(cmd, cwd=cwd)
+    if r.returncode != 0:
+        sys.exit(f"step failed ({r.returncode}): {' '.join(cmd[:4])} ...")
+
+
+def load_jsonl(p: Path) -> list[dict]:
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p.exists() else []
+
+
+def templates() -> dict[str, dict]:
+    d = yaml.safe_load((GOLD / "templates.yaml").read_text(encoding="utf-8"))
+    return {t["id"]: t for t in (d.get("templates") if isinstance(d, dict) else d)}
+
+
+def stratified_sample(tpls: dict, splits: set[str], n: int, seed: int) -> set[str]:
+    """Pick about n cases (template x franchise) spread round-robin over question types."""
+    by_type = defaultdict(list)
+    for t in tpls.values():
+        if t["split"] in splits and t.get("franchises"):
+            by_type[(t.get("types") or ["untyped"])[0]].append(t)
+    rng = random.Random(seed)
+    for v in by_type.values():
+        rng.shuffle(v)
+    chosen, cases = set(), 0
+    while cases < n and any(by_type.values()):
+        for k in sorted(by_type):
+            if by_type[k] and cases < n:
+                t = by_type[k].pop()
+                chosen.add(t["id"])
+                cases += len(t["franchises"])
+    return chosen
+
+
+def build_cases(calib: list[dict], tpls: dict, anchor: str, out: Path) -> tuple[int, int]:
+    usable, skipped = [], 0
+    for r in calib:
+        if r.get("status") in ("disagree", "error"):
+            skipped += 1          # the gold reference itself is not trustworthy for this case
+            continue
+        if "#" in r["case_id"]:   # alternate readings are scoring alternatives, not separate questions
+            continue
+        t = tpls.get(r["template_id"], {})
+        case = {"id": r["case_id"], "franchise": r["franchise"], "anchor": anchor, "question": r["question"]}
+        if t.get("conversation"):
+            case.update(conv=t["conversation"], turn=int(t.get("turn") or 1))
+        usable.append(case)
+    out.write_text("".join(json.dumps(c) + "\n" for c in usable), encoding="utf-8")
+    return len(usable), skipped
+
+
+def drift(pre: Path, post: Path) -> set[tuple[str, str]]:
+    a = {(r["case_id"], r["source"]): r for r in load_jsonl(pre)}
+    b = {(r["case_id"], r["source"]): r for r in load_jsonl(post)}
+    return {k for k in a if k in b and (a[k].get("rows") != b[k].get("rows"))}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--anchor")
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--splits", default="test")
+    ap.add_argument("--ids", default="", help="comma list of template ids (overrides --sample)")
+    ap.add_argument("--sample", type=int, default=0, help="about N cases, stratified by question type")
+    ap.add_argument("--franchises", default="")
+    ap.add_argument("--arms", default="A,B")
+    ap.add_argument("--runs", type=int, default=1)
+    ap.add_argument("--concurrency", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--score-only", action="store_true")
+    a = ap.parse_args()
+
+    RUNS.mkdir(exist_ok=True)
+    tpls = templates()
+    meta_file = RUNS / f"{a.tag}_meta.json"
+    if a.score_only:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    else:
+        if not a.anchor:
+            sys.exit("--anchor is required")
+        splits = set(a.splits.split(","))
+        ids = set(filter(None, a.ids.split(","))) or (stratified_sample(tpls, splits, a.sample, a.seed) if a.sample else set())
+        # multi-turn: pull in every turn of a sampled conversation
+        convs = {tpls[i].get("conversation") for i in ids if tpls.get(i, {}).get("conversation")}
+        ids |= {t["id"] for t in tpls.values() if t.get("conversation") in convs and convs}
+        sel = ["--splits", a.splits] + (["--ids", ",".join(sorted(ids))] if ids else []) + \
+              (["--franchises", a.franchises] if a.franchises else [])
+        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", a.tag, "--no-probes"] + sel)
+        calib = load_jsonl(PRIV / f"calibration_{a.anchor}_{a.tag}.jsonl")
+        n, skipped = build_cases(calib, tpls, a.anchor, RUNS / f"{a.tag}_cases.jsonl")
+        print(f"cases: {n} usable, {skipped} set aside because SQL and DAX references disagree")
+        arms = a.arms.split(",")
+        run_files = []
+        for r in range(1, a.runs + 1):
+            order = arms if r % 2 else list(reversed(arms))
+            for arm in order:
+                rid = f"{a.tag}-{arm.replace('+', 'plus')}-r{r}"
+                sh([NPX, "tsx", "src/cli.ts", "--arm", arm, "--anchor", a.anchor, "--cases",
+                    str(RUNS / f"{a.tag}_cases.jsonl"), "--run-id", rid, "--run-index", str(r),
+                    "--concurrency", str(a.concurrency)], cwd=BOT)
+                run_files.append(str(RUNS / f"{rid}.jsonl"))
+        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", f"{a.tag}_post", "--no-probes"] + sel)
+        moved = drift(PRIV / f"refs_{a.anchor}_{a.tag}.jsonl", PRIV / f"refs_{a.anchor}_{a.tag}_post.jsonl")
+        meta = {"anchor": a.anchor, "tag": a.tag, "arms": arms, "runs": a.runs, "run_files": run_files,
+                "cases": n, "gold_disagree_skipped": skipped, "drifted": sorted(map(list, moved))}
+        meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        print(f"reference drift during the batch: {len(moved)} case/source pair(s) set aside")
+
+    # score (drifted pairs excluded)
+    moved = {tuple(x) for x in meta["drifted"]}
+    runs = [r for f in meta["run_files"] for r in load_jsonl(Path(f))]
+    keep = [r for r in runs if (r.get("case_id"), SOURCE.get(r.get("arm"), "")) not in moved]
+    filtered = RUNS / f"{meta['tag']}_runs_kept.jsonl"
+    filtered.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
+    scored = RUNS / f"{meta['tag']}_scored.jsonl"
+    sh([sys.executable, "harness/score.py", "--runs", str(filtered), "--refs",
+        str(PRIV / f"refs_{meta['anchor']}_{meta['tag']}.jsonl"), "--gold", str(GOLD / "templates.yaml"),
+        "--out", str(scored)])
+    arms = meta["arms"]
+    if len(arms) >= 2:
+        sh([sys.executable, "harness/stats.py", "--scored", str(scored), "--gold", str(GOLD / "templates.yaml"),
+            "--runs", *meta["run_files"], "--a", arms[0], "--b", arms[1]])
+
+
+if __name__ == "__main__":
+    main()

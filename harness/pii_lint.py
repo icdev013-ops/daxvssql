@@ -115,7 +115,9 @@ def main() -> int:
             continue
         for ln, line in enumerate(text.splitlines(), 1):
             ws = [w for w in WORD.findall(line) if w.lower() not in STOP]
-            pairs = {norm(ws[i:i + 2]) for i in range(len(ws) - 1)}
+            # a leaked name keeps its capitals (Firstname Lastname); code and prose words don't
+            pairs = {norm(ws[i:i + 2]) for i in range(len(ws) - 1)
+                     if ws[i][0].isupper() and ws[i + 1][0].isupper() and ws[i].lower() != ws[i + 1].lower()}
             for p in pairs & names:
                 print(f"NAME   {f.relative_to(ROOT)}:{ln}  {mask(p)}")
                 hits += 1
