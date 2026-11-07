@@ -84,7 +84,7 @@ Errors specific to SQL:
 
 - **Arms.** A: DAX through the production loop with the fast path off. B: SQL over per-franchise views mirroring the Power BI tables. B+: B plus curated metric views. A and B use the same model, per-round settings, loop, guards, formatter, history window, shared rulebook (with bindings of equal depth) and verified examples. Prompts were frozen by hash before the test runs (PREREGISTRATION.md).
 - **Isolation.** Route B and B+ read a sandbox copy of MySQL through per-franchise SELECT-only accounts. Row-level security is proven by `sandbox/rls_test.py`: 38/38 checks for B and 42/42 for B+, including a scan of 145k Salesforce ids. Nothing in production was changed.
-- **Gold set.** 250 templates; every test case has paired SQL and DAX references that agree on all franchises. Each answer is scored against its reference re-run on the source that arm read. Route A's references were re-run after its answers: none of the checked references had moved.
+- **Gold set.** 250 templates; every test case has paired SQL and DAX references that agree on all franchises. Each answer is scored against its reference re-run on the source that arm read. Route A's references were re-run after its answers: none of the 301 DAX references moved, so no case was set aside.
 - **Scoring.** A deterministic number check first, with rule-based fixes applied to every arm alike (see DEVIATIONS.md). Every case where A and B split, and every case both failed, was adjudicated by hand by the coordinator (Claude Opus 5.5) against the rulebook; for B+, the cases where it split from B and the cases adjudicated for A/B. Each override and its reason is in `adjudication/eval_r1.csv`, which is local and gitignored because it quotes franchise data.
 
 ## Limits
