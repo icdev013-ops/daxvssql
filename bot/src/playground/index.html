@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAX vs SQL Test</title>
+<style>
+  :root {
+    --bg: #f6f5f3; --panel: #ffffff; --ink: #1d1b1a; --muted: #6b6560; --line: #e4e0db;
+    --accent: #9A012F; --a: #2c5d8f; --b: #2f7d4f; --a0: #7a5a1e; --warn: #a3401a; --code: #f1efec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151413; --panel: #1f1d1c; --ink: #ece9e5; --muted: #a39d96; --line: #34302d;
+            --accent: #d0476d; --a: #79a7d6; --b: #74c194; --a0: #d6b26a; --warn: #e48a62; --code: #2a2725; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line);
+           padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; color: var(--accent); white-space: nowrap; }
+  label { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  select, input[type=date], button { font: inherit; font-size: 14px; color: var(--ink); background: var(--panel);
+           border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); padding: 8px 18px; }
+  button:disabled { opacity: .5; cursor: default; }
+  main { display: grid; gap: 16px; padding: 16px; grid-template-columns: 1fr 1fr; max-width: 1500px; margin: 0 auto 120px; }
+  main.single { grid-template-columns: 1fr; max-width: 900px; }
+  .col { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-height: 60vh; display: flex; flex-direction: column; }
+  .col h2 { margin: 0; padding: 10px 14px; font-size: 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px; }
+  .col h2 .tag { font-weight: 600; }
+  .col h2 small { color: var(--muted); font-weight: 400; }
+  .msgs { padding: 12px 14px; display: flex; flex-direction: column; gap: 14px; }
+  .q { align-self: flex-end; background: var(--code); border-radius: 10px; padding: 6px 12px; max-width: 85%; }
+  .ans { border-left: 3px solid var(--line); padding-left: 10px; overflow-x: auto; }
+  .ans p { margin: 6px 0; }
+  .ans table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  .ans th, .ans td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; }
+  .ans td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .err { color: var(--warn); font-size: 13px; }
+  details { font-size: 12px; margin-top: 4px; }
+  pre { background: var(--code); padding: 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; margin: 4px 0; font-size: 12px; }
+  .thinking { color: var(--muted); font-style: italic; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 16px; }
+  footer form { display: flex; gap: 10px; max-width: 1500px; margin: 0 auto; }
+  footer textarea { flex: 1; font: inherit; resize: none; height: 44px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+  .note { font-size: 12px; color: var(--muted); }
+  .A { color: var(--a); } .B { color: var(--b); } .A0 { color: var(--a0); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>DAX vs SQL test</h1>
+  <label>Franchise <select id="fr"></select></label>
+  <label>Mode
+    <select id="mode">
+      <option value="A,B">Side by side: DAX (A) vs SQL (B)</option>
+      <option value="A">DAX only (A)</option>
+      <option value="B">SQL only (B)</option>
+      <option value="A0">Production as-is (A0, recipes on)</option>
+      <option value="A0,A">Production (A0) vs fair DAX (A)</option>
+    </select>
+  </label>
+  <label title="Questions like 'this year' are answered relative to this date">As of <input type="date" id="anchor"></label>
+  <label><input type="checkbox" id="showq"> show queries</label>
+  <button id="reset" type="button">New chat</button>
+  <span class="note">Local only · SQL reads the sandbox snapshot, DAX reads the live datasets · nothing touches the portal</span>
+</header>
+<main id="cols"></main>
+<footer>
+  <form id="f">
+    <textarea id="q" placeholder="Ask a question, e.g. How much have we sold this year?  (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button class="primary" id="ask">Ask</button>
+  </form>
+</footer>
+<script>
+const NAMES = { A: "Route A · DAX (Power BI model)", B: "Route B · SQL (MySQL views)", A0: "A0 · production as-is" };
+const state = { arms: [], hist: {} };
+const $ = (id) => document.getElementById(id);
+
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function inline(s) {
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+}
+function bare(c) { const m = String(c).match(/\[([^\]]+)\]\s*$/); return m ? m[1] : String(c); }
+function cell(v) {
+  if (v === null || v === undefined || v === "") return { t: "", n: false };
+  if (typeof v === "number") return { t: Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, { maximumFractionDigits: 2 }), n: true };
+  return { t: String(v), n: /^-?[\d,.$%]+$/.test(String(v)) };
+}
+function vizTable(json) {
+  let v; try { v = JSON.parse(json); } catch { return ""; }
+  const cols = (v.columns || []).map((c) => (typeof c === "object" ? c.name : c));
+  const rows = (v.data || []).map((r) => (Array.isArray(r) ? r : cols.map((c) => r[c])));
+  if (!cols.length) return "";
+  let h = "<table><tr>" + cols.map((c) => `<th>${esc(bare(c))}</th>`).join("") + "</tr>";
+  for (const r of rows.slice(0, 50)) h += "<tr>" + r.map((x) => { const c = cell(x); return `<td class="${c.n ? "n" : ""}">${esc(c.t)}</td>`; }).join("") + "</tr>";
+  return h + "</table>" + (v.rowCount > 50 ? `<div class="meta">showing 50 of ${v.rowCount} rows</div>` : "");
+}
+function render(md) {
+  const vizzes = [];
+  md = String(md)
+    .replace(/```viz\s*\n([\s\S]*?)```/g, (_, j) => { vizzes.push(j); return `\n@@VIZ${vizzes.length - 1}@@\n`; })
+    .replace(/\[[A-Z]+_LOG_R\d+:[^\n]*\]/g, "").replace(/\[Looking up live data…\]/g, "").replace(/\[CONTINUE_AVAILABLE\]/g, "");
+  const out = []; const lines = md.split(/\r?\n/); let list = null;
+  const flush = () => { if (list) { out.push(`<${list.t}>` + list.items.map((i) => `<li>${inline(i)}</li>`).join("") + `</${list.t}>`); list = null; } };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const viz = l.match(/^@@VIZ(\d+)@@$/);
+    if (viz) { flush(); out.push(vizTable(vizzes[+viz[1]])); continue; }
+    if (/^\s*\|.*\|\s*$/.test(l) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1] || "")) {
+      flush();
+      const row = (s) => s.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      let h = "<table><tr>" + row(l).map((c) => `<th>${inline(c)}</th>`).join("") + "</tr>"; i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        h += "<tr>" + row(lines[i]).map((c) => `<td class="${/^-?[\d,.$%]+$/.test(c) ? "n" : ""}">${inline(c)}</td>`).join("") + "</tr>"; i++;
+      }
+      i--; out.push(h + "</table>"); continue;
+    }
+    const b = l.match(/^\s*[-*•]\s+(.*)$/), n = l.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (b || n) { const t = b ? "ul" : "ol"; if (!list || list.t !== t) { flush(); list = { t, items: [] }; } list.items.push((b || n)[1]); continue; }
+    flush();
+    const hd = l.match(/^#{1,4}\s+(.*)$/);
+    if (hd) out.push(`<p><strong>${inline(hd[1])}</strong></p>`);
+    else if (l.trim()) out.push(`<p>${inline(l)}</p>`);
+  }
+  flush();
+  return out.join("");
+}
+
+function columns() {
+  state.arms = $("mode").value.split(",");
+  const main = $("cols"); main.className = state.arms.length === 1 ? "single" : ""; main.innerHTML = "";
+  for (const a of state.arms) {
+    state.hist[a] = [];
+    const col = document.createElement("section"); col.className = "col";
+    col.innerHTML = `<h2><span class="tag ${a.replace("+", "")}">${esc(NAMES[a])}</span><small id="sum-${a}"></small></h2><div class="msgs" id="m-${a}"></div>`;
+    main.appendChild(col);
+  }
+}
+
+function addQ(a, q) { const d = document.createElement("div"); d.className = "q"; d.textContent = q; $("m-" + a).appendChild(d); }
+function addPending(a) { const d = document.createElement("div"); d.className = "ans thinking"; d.textContent = "Thinking…"; $("m-" + a).appendChild(d); return d; }
+
+function fill(el, a, r) {
+  el.className = "ans";
+  const qs = (r.queries || []).map((x) => `<pre>${esc(x.query)}</pre><div class="meta">round ${x.round} · ${x.ok ? `${x.rows ?? 0} row(s)${x.truncated ? " (truncated)" : ""}` : `<span class="err">${esc(x.blocked_by ? "blocked by " + x.blocked_by + ": " : "")}${esc(x.error || "failed")}</span>`} · ${x.ms} ms</div>`).join("");
+  const cost = r.cost_usd ? (r.cost_usd.reported ?? r.cost_usd.estimated) : null;
+  const meta = [`${(r.latency_ms / 1000).toFixed(1)} s`, cost != null ? `$${cost.toFixed(4)}` : null,
+    `${r.rounds} round${r.rounds === 1 ? "" : "s"}`, `${(r.queries || []).length} quer${(r.queries || []).length === 1 ? "y" : "ies"}`,
+    r.recipe ? `recipe ${esc(r.recipe)}` : null, (r.guards || []).length ? `guards: ${esc(r.guards.join(", "))}` : null].filter(Boolean).join(" · ");
+  el.innerHTML = render(r.answer) +
+    (r.errors && r.errors.length ? `<div class="err">${esc(r.errors.join("; "))}</div>` : "") +
+    `<div class="meta">${meta}</div>` +
+    `<details ${$("showq").checked ? "open" : ""}><summary>${a === "B" ? "SQL" : "DAX"} executed</summary>${qs || "<div class='meta'>no query</div>"}</details>`;
+}
+
+async function ask(q) {
+  const fr = $("fr").value, anchor = $("anchor").value;
+  $("ask").disabled = true;
+  await Promise.all(state.arms.map(async (a) => {
+    addQ(a, q);
+    const el = addPending(a);
+    try {
+      const res = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arm: a, franchise: fr, anchor, question: q, history: state.hist[a] }) });
+      const r = await res.json();
+      if (!res.ok) throw new Error(r.error || res.statusText);
+      fill(el, a, r);
+      state.hist[a].push({ role: "user", content: q }, { role: "assistant", content: r.answer });
+      $("sum-" + a).textContent = `${fr} · as of ${r.anchor}`;
+    } catch (e) { el.className = "ans err"; el.textContent = "Error: " + e.message; }
+    el.scrollIntoView({ block: "nearest" });
+  }));
+  $("ask").disabled = false; $("q").focus();
+}
+
+(async () => {
+  const cfg = await (await fetch("/api/config")).json();
+  $("fr").innerHTML = cfg.franchises.map((f) => `<option>${f}</option>`).join("");
+  $("anchor").value = cfg.today;
+  columns();
+  for (const id of ["fr", "mode"]) $(id).addEventListener("change", columns);
+  $("reset").addEventListener("click", columns);
+  $("f").addEventListener("submit", (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q) { $("q").value = ""; ask(q); } });
+  $("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("f").requestSubmit(); } });
+  $("q").focus();
+})();
+</script>
+</body>
+</html>

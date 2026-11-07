@@ -49,4 +49,14 @@ python sandbox/sandbox.py stop           # stop when not in use
 python sandbox/sandbox.py purge          # delete datadir, dumps and sandbox passwords
 ```
 
-Bot usage is in `bot/README.md`.
+## Try it: local test page
+
+```bash
+python sandbox/sandbox.py start        # if the sandbox isn't running
+cd bot && npm install && npm run vendor # first time only
+npm run playground                      # -> http://127.0.0.1:4317
+```
+
+Pick a franchise and a mode (side by side DAX vs SQL, one route, or production as-is), set the "as of" date, and ask. Each answer shows its time, cost, rounds and the exact DAX or SQL that ran; follow-up questions keep each route's own chat history. The page binds to 127.0.0.1 and refuses other machines. Turns are logged to `runs/playground-<date>.jsonl` (gitignored).
+
+CLI usage is in `bot/README.md`.
