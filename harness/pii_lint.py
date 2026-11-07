@@ -35,7 +35,9 @@ WORD = re.compile(r"[A-Za-z][A-Za-z'.-]+")
 STOP = {"lead", "leads", "sold", "lost", "dead", "project", "projects", "designer", "designers", "source",
         "date", "created", "name", "total", "amount", "the", "and", "of", "to", "in", "for", "by", "x", "unassigned",
         # placeholder values seen in the data ("First Last", "Test Customer", ...)
-        "first", "last", "test", "customer", "unknown", "full", "new", "none", "null", "n/a"}
+        "first", "last", "test", "customer", "unknown", "full", "new", "none", "null", "n/a",
+        # lead-status words some records carry as a name ("Not Junk", "Duplicate Lead", ...)
+        "not", "junk", "duplicate", "cancelled", "canceled", "spam", "use", "no", "yes"}
 
 
 def env(key: str) -> str:
