@@ -98,6 +98,8 @@ def within(ref: float, cand: Num | float, col_type: str) -> bool:
     c = cand.value if isinstance(cand, Num) else float(cand)
     disp = cand.display_tol() if isinstance(cand, Num) else 0.0
     diff = abs(c - ref)
+    if col_type == "percent" and abs(c) <= 1.0 and abs(ref) > 1.0:
+        diff = min(diff, abs(c * 100 - ref))          # 0.769 written for 76.9%
     if col_type == "count":
         tol = 0.0
     elif col_type == "percent":
@@ -121,8 +123,22 @@ def to_float(x) -> float | None:
         return None
 
 
-def norm_label(x) -> str:
-    return re.sub(r"\s+", " ", str(x if x is not None else "")).strip().lower()
+MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def norm_label(x, year_hint: str | None = None) -> str:
+    s = re.sub(r"\s+", " ", str(x if x is not None else "")).strip().lower()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})[t ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?z?$", s)   # 2026-01-11T00:00:00 -> 2026-01-11
+    if m:
+        return m.group(1)
+    if year_hint:   # reference labels are YYYY-MM: map "jan", "january", "jan 2026", "november*", or month number 1-12
+        s2 = s.rstrip("*†‡ ").strip()
+        m = re.match(r"^([a-z]{3})[a-z]*\.?(?:[ ,-]+(\d{4}))?$", s2)
+        if m and m.group(1) in MONTHS:
+            return f"{m.group(2) or year_hint}-{MONTHS[m.group(1)]:02d}"
+        if re.fullmatch(r"(0?[1-9]|1[0-2])(\.0)?", s2):
+            return f"{year_hint}-{int(float(s2)):02d}"
+    return s
 
 
 # ----------------------------------------------------------------------------- table views of an answer
@@ -218,13 +234,20 @@ def score_list_like(tpl, ref, answer, shape) -> tuple[str, str, str]:
     if not ref_rows:
         return "undecidable", "", "reference returned no rows"
     tables = answer_tables(answer)
+    ref_labels_raw = [str(r[idx[lab]]) for r in ref_rows]
+    ym = [l for l in ref_labels_raw if re.match(r"^\d{4}-\d{2}$", l)]
+    year_hint = ym[0][:4] if ym and len({l[:4] for l in ym}) == 1 else None
+    ref_keys = {norm_label(l) for l in ref_labels_raw}
     best = None
     for names, rows in tables:
-        li = pick_col(names, lab, 0)
+        li = pick_col(names, lab, None)
+        if li is None:   # no column named like the label: take the one whose values match the labels best
+            scores = [sum(norm_label(r[i], year_hint) in ref_keys for r in rows if i < len(r)) for i in range(len(names))]
+            li = max(range(len(names)), key=lambda i: scores[i]) if names and max(scores) > 0 else (0 if names else None)
         if li is None:
             continue
-        got = {norm_label(r[li]): r for r in rows if li < len(r)}
-        order = [norm_label(r[li]) for r in rows if li < len(r)]
+        got = {norm_label(r[li], year_hint): r for r in rows if li < len(r)}
+        order = [norm_label(r[li], year_hint) for r in rows if li < len(r)]
         ok_labels, ok_vals, problems = 0, 0, []
         for pos, rr in enumerate(ref_rows):
             key = norm_label(rr[idx[lab]])
@@ -248,7 +271,17 @@ def score_list_like(tpl, ref, answer, shape) -> tuple[str, str, str]:
             # the order the owner READS: first mention of each label in the prose (a DAX TOPN
             # returns its rows unsorted, so the attached table can be in any order)
             prose = strip_markers(answer).lower()
-            pos = {k: prose.find(k) for k in ref_order}
+            pos, taken = {}, []
+            for k in sorted(ref_order, key=len, reverse=True):
+                start = 0
+                while True:
+                    i = prose.find(k, start)
+                    if i < 0 or not any(a <= i < b or a < i + len(k) <= b for a, b in taken):
+                        break
+                    start = i + 1
+                pos[k] = i
+                if i >= 0:
+                    taken.append((i, i + len(k)))
             prose_seen = sorted((k for k in ref_order if pos[k] >= 0), key=lambda k: pos[k])
             ok_order = any(s[: len(ref_order)] == ref_order or ties_explain(tpl, ref_rows, idx, s)
                            for s in (seen, prose_seen) if len(s) >= len(ref_order))
@@ -362,7 +395,10 @@ def main() -> None:
         if tpl is None:
             continue
         src = "dax" if str(turn.get("arm", "")).upper().startswith("A") else "sql"
-        key = (re.sub(r"~p\d+", "", str(turn.get("case_id"))), src)   # paraphrase -> its original's reference
+        cid = re.sub(r"~p\d+", "", str(turn.get("case_id")))          # paraphrase -> its original's reference
+        if tpl.get("paraphrase_of"):                                   # R061@ICLA -> T061@ICLA
+            cid = cid.replace(f"{tid}@", f"{tpl['paraphrase_of']}@", 1)
+        key = (cid, src)
         s = score_with_alternates(tpl, refs.get(key), turn, sorted(alts.get(key, []), key=lambda x: x[0]))
         s["template_id"] = tid
         out.append(s)

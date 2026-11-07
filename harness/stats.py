@@ -179,6 +179,8 @@ def latency_cost(runs, arm):
             continue
         l = r.get("latency_ms") or (r.get("totals") or {}).get("latency_ms")
         c = r.get("cost_usd") or (r.get("totals") or {}).get("cost_usd")
+        if isinstance(c, dict):   # bot log: {"estimated": x, "reported": y}; prefer what OpenRouter billed
+            c = c.get("reported") if c.get("reported") is not None else c.get("estimated")
         if l is not None:
             lat.append(float(l))
         if c is not None:

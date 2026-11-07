@@ -78,6 +78,32 @@ class ScoreTests(unittest.TestCase):
         s2 = score.score_with_alternates(alt_tpl, REF, turn("**700 leads** sold."), [(1, alt_ref)])
         self.assertEqual(s2["verdict"], "fail")
 
+    def test_nested_label_prose_order(self):
+        # "refx" must not be found inside "refx - company" when reading the prose ranking
+        tpl = dict(LIST_TPL, label_column="src", result_columns=["src", "amt"], value_columns=["amt"], top_k=2,
+                   order_by={"column": "amt"})
+        ref = {"rows": [["refx - company", 300.0], ["refx", 200.0]]}
+        viz = {"columns": [{"name": "src"}, {"name": "amt"}], "data": [{"src": "refx", "amt": 200}, {"src": "refx - company", "amt": 300}]}
+        a = "1. **refx - company** $300\n2. **refx** $200\n\n```viz\n" + json.dumps(viz) + "\n```\n"
+        self.assertEqual(score.score_turn(tpl, ref, turn(a))["verdict"], "pass")
+
+    def test_label_column_found_by_values_and_month_names(self):
+        tpl = {"answer_shape": "series", "result_columns": ["Month", "Appointments"], "label_column": "Month",
+               "value_columns": ["Appointments"], "col_types": {"Appointments": "count"}}
+        ref = {"rows": [["2026-01", 75], ["2026-02", 74]]}
+        viz = {"columns": [{"name": "Year"}, {"name": "Mon"}, {"name": "Appointments"}],
+               "data": [{"Year": 2026, "Mon": "January", "Appointments": 75}, {"Year": 2026, "Mon": "February", "Appointments": 74}]}
+        a = "By month:\n\n```viz\n" + json.dumps(viz) + "\n```\n"
+        self.assertEqual(score.score_turn(tpl, ref, turn(a))["verdict"], "pass")
+
+    def test_datetime_label_and_percent_fraction(self):
+        tpl = {"answer_shape": "ranked_list", "result_columns": ["Week", "Rate"], "label_column": "Week",
+               "value_columns": ["Rate"], "col_types": {"Rate": "percent"}, "top_k": 1, "order_by": {"column": "Rate"}}
+        ref = {"rows": [["2026-01-11", 76.92], ["2026-01-04", 50.0]]}
+        viz = {"columns": [{"name": "Week"}, {"name": "Rate"}], "data": [{"Week": "2026-01-11T00:00:00", "Rate": 0.7692}]}
+        a = "Busiest week:\n\n```viz\n" + json.dumps(viz) + "\n```\n"
+        self.assertEqual(score.score_turn(tpl, ref, turn(a))["verdict"], "pass")
+
     def test_percent_display_rounding(self):
         tpl = {"answer_shape": "number", "result_columns": ["rate"], "col_types": {"rate": "percent"},
                "headline": ["rate"]}
