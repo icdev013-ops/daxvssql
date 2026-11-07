@@ -865,7 +865,7 @@ templates:
     answer_shape: number
     result_columns: [Sold Amount, Sold Count]
     col_types: {Sold Amount: currency, Sold Count: count}
-    headline: [Sold Amount, Sold Count]
+    headline: [Sold Amount]
     reference_sql: *sold_scalar_sql
     reference_dax: *sold_scalar_dax
     notes: "Previous calendar month on the franchise basis; the answer names its basis and offers the other one."
@@ -1253,7 +1253,7 @@ templates:
     answer_shape: number
     result_columns: [Lost Amount, Lost Count]
     col_types: {Lost Amount: currency, Lost Count: count}
-    headline: [Lost Amount, Lost Count]
+    headline: [Lost Amount]
     reference_sql: |
       SELECT SUM(`Amount`) AS `Lost Amount`, COUNT(*) AS `Lost Count`
       FROM Salesforce_Data
@@ -1447,7 +1447,7 @@ templates:
     col_types: {Lead Source Channel: text, Leads: count}
     label_column: Lead Source Channel
     value_columns: [Leads]
-    top_k: 5
+    top_k: 3
     order_by: {column: Leads, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Lead Source Channel`, COUNT(*) AS `Leads`
@@ -1499,7 +1499,7 @@ templates:
     col_types: {Designer: text, Average Sale: currency, Sold Count: count}
     label_column: Designer
     value_columns: [Average Sale]
-    top_k: 3
+    top_k: 1
     order_by: {column: Average Sale, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Designer`, SUM(`Amount`) / COUNT(*) AS `Average Sale`, COUNT(*) AS `Sold Count`
@@ -1537,7 +1537,7 @@ templates:
     col_types: {Designer: text, Open Proposals: count, Proposal Value: currency}
     label_column: Designer
     value_columns: [Open Proposals]
-    top_k: 5
+    top_k: 3
     order_by: {column: Open Proposals, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Designer`, COUNT(*) AS `Open Proposals`, SUM(`Amount`) AS `Proposal Value`
@@ -1567,7 +1567,7 @@ templates:
     col_types: {Designer: text, Lost Count: count, Lost Amount: currency}
     label_column: Designer
     value_columns: [Lost Count]
-    top_k: 3
+    top_k: 1
     order_by: {column: Lost Count, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Designer`, COUNT(*) AS `Lost Count`, SUM(`Amount`) AS `Lost Amount`
@@ -1597,7 +1597,7 @@ templates:
     col_types: {Staff Member: text, Appointments: count}
     label_column: Staff Member
     value_columns: [Appointments]
-    top_k: 5
+    top_k: 3
     order_by: {column: Appointments, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Assigned Staff Member` AS `Staff Member`, COUNT(*) AS `Appointments`
@@ -1637,7 +1637,7 @@ templates:
     col_types: {Lead Source Group: text, Sold Amount: currency, Sold Count: count}
     label_column: Lead Source Group
     value_columns: [Sold Amount]
-    top_k: 3
+    top_k: 1
     order_by: {column: Sold Amount, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Lead Source Group`, SUM(`Amount`) AS `Sold Amount`, COUNT(*) AS `Sold Count`
@@ -2293,14 +2293,14 @@ templates:
     types: [appointments_rules, ranking]
     question: "Which lead source channel produced the most appointments this year? Leave out entries with no source."
     franchises: [ICLA, ICCH, ICAU]
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: ranked_list
     result_columns: [Lead Source Channel, Appointments]
     col_types: {Lead Source Channel: text, Appointments: count}
     label_column: Lead Source Channel
     value_columns: [Appointments]
-    top_k: 5
+    top_k: 1
     order_by: {column: Appointments, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Lead Source Channel`, COUNT(*) AS `Appointments`
@@ -2366,7 +2366,7 @@ templates:
             AND `Assigned Staff Member` IS NOT NULL AND `Assigned Staff Member` <> ''
           GROUP BY `Assigned Staff Member`
           ORDER BY COUNT(*) DESC, `Assigned Staff Member` LIMIT 1 OFFSET 1
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: number
     result_columns: [Appointments]
@@ -2419,7 +2419,7 @@ templates:
     types: [appointments_rules]
     question: "What share of this year's appointments were design appointments?"
     franchises: [ICCH, ICAU]
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: number
     result_columns: [Design Share, Design Appointments, Appointments]
@@ -2476,7 +2476,7 @@ templates:
     types: [appointments_rules, time_intelligence, ranking]
     question: "Which week this year had the most appointments?"
     franchises: [ICLA, ICCH]
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: ranked_list
     result_columns: [Week Start, Appointments]
@@ -2516,7 +2516,7 @@ templates:
     types: [appointments_sales, appointments_rules]
     question: "What share of this year's appointments were for projects that ended up sold?"
     franchises: [ICLA, ICCH, ICAU]
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: number
     result_columns: [Success Rate, Sold-Project Appointments, Appointments]
@@ -2587,7 +2587,7 @@ templates:
     answer_shape: number
     result_columns: [Sold With Design Appointment, Sold Projects]
     col_types: {Sold With Design Appointment: count, Sold Projects: count}
-    headline: [Sold With Design Appointment, Sold Projects]
+    headline: [Sold With Design Appointment]
     reference_sql: |
       SELECT SUM(s.`Project Name` IN (SELECT `Project Name` FROM Appointments
                                       WHERE {appt_rule_sql} AND `Activity Type` = 'Design' AND `Project Name` IS NOT NULL)) AS `Sold With Design Appointment`,
@@ -2650,14 +2650,14 @@ templates:
     types: [appointments_sales, appointments_rules, ranking]
     question: "Which lead source channel's appointments turned into sales most often this year? Only channels with at least 20 appointments, and leave out entries with no source."
     franchises: [ICCH, ICAU]
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: ranked_list
     result_columns: [Lead Source Channel, Success Rate, Sold-Project Appointments, Appointments]
     col_types: {Lead Source Channel: text, Success Rate: percent, Sold-Project Appointments: count, Appointments: count}
     label_column: Lead Source Channel
     value_columns: [Success Rate]
-    top_k: 3
+    top_k: 1
     order_by: {column: Success Rate, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT `Lead Source Channel`, 100 * SUM(`Project Stage` = 'Sold') / COUNT(*) AS `Success Rate`,
@@ -2699,7 +2699,7 @@ templates:
     answer_shape: number
     result_columns: [Projects, Sold Projects, Sold Amount]
     col_types: {Projects: count, Sold Projects: count, Sold Amount: currency}
-    headline: [Sold Amount, Sold Projects]
+    headline: [Sold Amount]
     reference_sql: |
       WITH f AS (
         SELECT `Project Name` AS pn, MIN(`Appointment Start Time`) AS fa
@@ -2770,7 +2770,7 @@ templates:
             AND `Project Name` IS NOT NULL AND `Project Name` <> '' AND `Assigned Staff Member` IS NOT NULL
           GROUP BY `Assigned Staff Member`
           ORDER BY COUNT(DISTINCT `Project Name`) DESC, `Assigned Staff Member` LIMIT 1
-    period: ytd
+    period: this_year
     date_basis: appointment_start
     answer_shape: number
     result_columns: [Sold Amount, Sold Projects, Projects Met]
@@ -2915,7 +2915,7 @@ templates:
     answer_shape: number
     result_columns: [Proposal Value, Proposals]
     col_types: {Proposal Value: currency, Proposals: count}
-    headline: [Proposal Value, Proposals]
+    headline: [Proposal Value]
     reference_sql: |
       SELECT SUM(`Amount`) AS `Proposal Value`, COUNT(*) AS `Proposals`
       FROM Salesforce_Data
@@ -3315,7 +3315,7 @@ templates:
     col_types: {Lead Source Channel: text, Win %: percent, Sold: count, Leads: count}
     label_column: Lead Source Channel
     value_columns: [Win %]
-    top_k: 3
+    top_k: 1
     order_by: {column: Win %, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT l.`Lead Source Channel`, 100 * SUM(m.`Journey Outcome` = 'Sold') / COUNT(*) AS `Win %`,
@@ -4146,7 +4146,7 @@ templates:
     col_types: {Designer: text, Closing %: percent, Sold: count, Projects: count}
     label_column: Designer
     value_columns: [Closing %]
-    top_k: 5
+    top_k: 1
     order_by: {column: Closing %, direction: desc, ties: either order accepted}
     reference_sql: |
       SELECT s.`Designer`, 100 * SUM(s.`Revised Stage` = 'Sold') / COUNT(*) AS `Closing %`,

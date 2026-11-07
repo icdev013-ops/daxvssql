@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -73,15 +74,40 @@ def stratified_sample(tpls: dict, splits: set[str], n: int, seed: int) -> set[st
     return chosen
 
 
+def paraphrase_questions(t: dict, r: dict, anchor: str) -> list[str]:
+    """Robustness templates: the reworded variants, with the same params and period tokens filled."""
+    sys.path.insert(0, str(GOLD))
+    import validate  # noqa: E402  (gold/validate.py)
+    a = validate.dt.date.fromisoformat(anchor)
+    tokens = {**validate.anchor_tokens(a), **validate.period_tokens(t.get("period") or "all_time", a)}
+    return [validate.fill(p, tokens, r.get("params") or {}, t["id"]) for p in t.get("paraphrases") or []]
+
+
 def build_cases(calib: list[dict], tpls: dict, anchor: str, out: Path) -> tuple[int, int]:
-    usable, skipped = [], 0
+    usable, skipped, seen = [], 0, set()
     for r in calib:
+        if "case_id" not in r:
+            continue
         if r.get("status") in ("disagree", "error"):
             skipped += 1          # the gold reference itself is not trustworthy for this case
             continue
-        if "#" in r["case_id"]:   # alternate readings are scoring alternatives, not separate questions
+        if "#alt" in r["case_id"]:  # alternate reading of a normal question: a scoring alternative only
             continue
+        # rubric splits carry supporting references as T#r1@E / T#f1@E / T#evidence@E: ask T@E once
+        base = re.sub(r"#[^@]+", "", r["case_id"])
+        if base in seen:
+            continue
+        seen.add(base)
+        r = {**r, "case_id": base}
         t = tpls.get(r["template_id"], {})
+        if "question" not in r and t.get("split") != "robustness":
+            continue
+        if t.get("split") == "robustness" and t.get("paraphrases"):
+            # the original wording is already the Test case; run only the rewordings
+            for k, q in enumerate(paraphrase_questions(t, r, anchor), 1):
+                usable.append({"id": r["case_id"].replace("@", f"~p{k}@"), "franchise": r["franchise"],
+                               "anchor": anchor, "question": q})
+            continue
         case = {"id": r["case_id"], "franchise": r["franchise"], "anchor": anchor, "question": r["question"]}
         if t.get("conversation"):
             case.update(conv=t["conversation"], turn=int(t.get("turn") or 1))

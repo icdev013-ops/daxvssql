@@ -94,7 +94,9 @@ def render_ref(ref: dict | None, alts: list[dict]) -> str:
         return " | ".join(r.get("columns") or []) + "\n" + "\n".join(" | ".join(str(x) for x in row) for row in rows)
     out = "REFERENCE RESULT:\n" + one(ref)
     for i, a in enumerate(alts, 1):
-        out += f"\n\nALTERNATE REFERENCE {i} (another acceptable reading):\n" + one(a)
+        lab = str(a.get("label") or f"alt{i}")
+        kind = {"r": "READING", "f": "FACT", "e": "EVIDENCE"}.get(lab[:1], "ALTERNATE READING")
+        out += f"\n\n{kind} {lab} (supporting reference):\n" + one(a)
     return out
 
 
@@ -131,8 +133,9 @@ def cmd_judge(a) -> None:
     refs: dict[tuple[str, str], dict] = {}
     alts: dict[tuple[str, str], list] = {}
     for r in load_jsonl([a.refs]):
-        base = re.sub(r"#alt\d+", "", r["case_id"])   # "T001#alt2@ICAU" -> "T001@ICAU"
-        if "#alt" in r["case_id"]:       # alternate reading of an ambiguous question
+        base = re.sub(r"#[^@]+", "", r["case_id"])   # T#alt2@E / T#r1@E / T#f1@E / T#evidence@E -> T@E
+        if "#" in r["case_id"]:          # alternate reading, ambiguity reading, fact or evidence reference
+            r = {**r, "label": re.search(r"#([^@]+)", r["case_id"]).group(1)}
             alts.setdefault((base, r["source"]), []).append(r)
         else:
             refs[(base, r["source"])] = r

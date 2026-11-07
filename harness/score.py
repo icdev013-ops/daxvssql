@@ -357,12 +357,12 @@ def main() -> None:
             refs[(r["case_id"], r["source"])] = r
     out, counts = [], {}
     for turn in load_jsonl(a.runs):
-        tid = turn.get("template_id") or str(turn.get("case_id", "")).split("@")[0]
+        tid = turn.get("template_id") or str(turn.get("case_id", "")).split("@")[0].split("~")[0]
         tpl = templates.get(tid)
         if tpl is None:
             continue
         src = "dax" if str(turn.get("arm", "")).upper().startswith("A") else "sql"
-        key = (turn.get("case_id"), src)
+        key = (re.sub(r"~p\d+", "", str(turn.get("case_id"))), src)   # paraphrase -> its original's reference
         s = score_with_alternates(tpl, refs.get(key), turn, sorted(alts.get(key, []), key=lambda x: x[0]))
         s["template_id"] = tid
         out.append(s)
