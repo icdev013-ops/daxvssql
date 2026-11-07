@@ -132,6 +132,8 @@ def main() -> None:
     ap.add_argument("--franchises", default="")
     ap.add_argument("--arms", default="A,B")
     ap.add_argument("--runs", type=int, default=1)
+    ap.add_argument("--run-offset", type=int, default=0, help="first run index = offset + 1 (batches of one run each)")
+    ap.add_argument("--dax-rpm", type=int, default=25, help="reference DAX calls per minute (shared service principal)")
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--score-only", action="store_true")
@@ -152,13 +154,14 @@ def main() -> None:
         ids |= {t["id"] for t in tpls.values() if t.get("conversation") in convs and convs}
         sel = ["--splits", a.splits] + (["--ids", ",".join(sorted(ids))] if ids else []) + \
               (["--franchises", a.franchises] if a.franchises else [])
-        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", a.tag, "--no-probes"] + sel)
+        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", a.tag, "--no-probes",
+            "--dax-rpm", str(a.dax_rpm)] + sel)
         calib = load_jsonl(PRIV / f"calibration_{a.anchor}_{a.tag}.jsonl")
         n, skipped = build_cases(calib, tpls, a.anchor, RUNS / f"{a.tag}_cases.jsonl")
         print(f"cases: {n} usable, {skipped} set aside because SQL and DAX references disagree")
         arms = a.arms.split(",")
         run_files = []
-        for r in range(1, a.runs + 1):
+        for r in range(a.run_offset + 1, a.run_offset + a.runs + 1):
             order = arms if r % 2 else list(reversed(arms))
             for arm in order:
                 rid = f"{a.tag}-{arm.replace('+', 'plus')}-r{r}"
@@ -166,7 +169,8 @@ def main() -> None:
                     str(RUNS / f"{a.tag}_cases.jsonl"), "--run-id", rid, "--run-index", str(r),
                     "--concurrency", str(a.concurrency)], cwd=BOT)
                 run_files.append(str(RUNS / f"{rid}.jsonl"))
-        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", f"{a.tag}_post", "--no-probes"] + sel)
+        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", f"{a.tag}_post", "--no-probes",
+            "--dax-rpm", str(a.dax_rpm)] + sel)
         moved = drift(PRIV / f"refs_{a.anchor}_{a.tag}.jsonl", PRIV / f"refs_{a.anchor}_{a.tag}_post.jsonl")
         meta = {"anchor": a.anchor, "tag": a.tag, "arms": arms, "runs": a.runs, "run_files": run_files,
                 "cases": n, "gold_disagree_skipped": skipped, "drifted": sorted(map(list, moved))}
