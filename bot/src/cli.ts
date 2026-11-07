@@ -11,7 +11,7 @@
  *   --anchor YYYY-MM-DD      the date the CONTEXT line carries (cases may set their own); never the clock
  *   --q "<question>"         single question;  --history <file.json>  prior turns [{role, content}, ...]
  *   --cases <file.jsonl>     one case per line: {"id","question","franchise","anchor","history","arm"}
- *   --concurrency 1|2        batch workers (default 1, max 2)
+ *   --concurrency 1|2        batch workers (default 1, max 3)
  *   --run-id <id>            log file name (default: timestamp + arm); log goes to daxvssql/runs/<run-id>.jsonl
  *   --rules-dir <dir>        shared rules for A and B (default daxvssql/rules: business_rules.md + dax_bindings.md or
  *                            sql_bindings.md; staff names from daxvssql/private/rules_names.md); --no-rules to omit
@@ -142,7 +142,7 @@ async function main() {
     parseAnchor(c.anchor ?? defaultAnchor ?? "");
   }
 
-  const concurrency = Math.min(2, Math.max(1, Number(args.concurrency ?? 1) || 1));
+  const concurrency = Math.min(3, Math.max(1, Number(args.concurrency ?? 1) || 1));
   const runId = typeof args["run-id"] === "string" ? args["run-id"] : newRunId(armArg.replace("+", "plus"));
   const log = new RunLog(runId);
   console.error(`run ${runId}: ${cases.length} case(s), arm ${armArg}, concurrency ${concurrency} -> ${path.relative(process.cwd(), log.file) || log.file}`);

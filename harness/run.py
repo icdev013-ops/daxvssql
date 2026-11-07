@@ -143,6 +143,13 @@ def main() -> None:
     a = ap.parse_args()
 
     RUNS.mkdir(exist_ok=True)
+    # Per-batch overrides (logged in DEVIATIONS.md), read at start so a running driver can be steered
+    # without killing it: runs/batch_overrides.json = {"<tag>": {"splits": "...", "concurrency": 3}}
+    ov_file = RUNS / "batch_overrides.json"
+    if ov_file.exists():
+        for k, v in (json.loads(ov_file.read_text(encoding="utf-8")).get(a.tag) or {}).items():
+            print(f"override for {a.tag}: {k} = {v!r} (was {getattr(a, k, None)!r})")
+            setattr(a, k, v)
     tpls = templates()
     meta_file = RUNS / f"{a.tag}_meta.json"
     if a.score_only:
