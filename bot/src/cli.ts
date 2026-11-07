@@ -6,7 +6,7 @@
  *   dry run: tsx src/cli.ts --arm B --franchise ICAU --anchor 2026-11-07 --q "..." --dry-run [--dump-prompts <dir>]
  *
  * Options:
- *   --arm A0|A|B|B+          test arm (B+ is a stub)
+ *   --arm A0|A|B|B+          test arm (B+ = B plus the governed metric views of sandbox/views_plus)
  *   --franchise ICLA|ICCH|ICAU   the franchise the turn runs as (cases may set their own)
  *   --anchor YYYY-MM-DD      the date the CONTEXT line carries (cases may set their own); never the clock
  *   --q "<question>"         single question;  --history <file.json>  prior turns [{role, content}, ...]
@@ -101,8 +101,8 @@ async function main() {
     const q = typeof args.q === "string" ? args.q : "How much have we sold this year?";
     const intent = arm.vendor.detectIntent(arm.vendor.extractChartOverride(q).question, false);
     const rendered = arm.renderRules(franchise, anchor);
-    const vision = arm.buildVision(franchise, intent, rendered);
-    const full = arm.buildFull(franchise, intent, rendered);
+    const vision = arm.buildVision(franchise, intent, rendered, anchor);
+    const full = arm.buildFull(franchise, intent, rendered, anchor);
     const ctx = arm.contextLine(anchor, franchise, true);
     console.log(JSON.stringify({
       arm: arm.id, franchise, anchor: anchor.iso, intent,

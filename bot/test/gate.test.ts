@@ -1,9 +1,11 @@
 /**
- * Offline unit tests for the SQL gate (no database, no LLM).
+ * Offline unit tests for the SQL gate (no database, no LLM), for arm B (poc_<ent>) and arm B+ (pocplus_<ent>).
  * Run: npm test   (node --import tsx --test test/*.test.ts)
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { parseAnchor } from "../src/context";
+import { loadMetricViewsDoc, renderMetricViews } from "../src/prompts/sqlPlus";
 import { gateSql } from "../src/tools/sqlGate";
 
 const opts = {
@@ -134,5 +136,60 @@ describe("SQL gate accepts valid SELECTs", () => {
       assert.deepEqual([...r.tables].sort(), ["Leads", "Salesforce_Data"]);
       assert.deepEqual(r.ctes, ["s"]);
     }
+  });
+});
+
+// ------------------------------------------------------------------------------------------------- arm B+
+/** Arm B+: the same gate, schema pocplus_<ent>, allowlist = the pass-through views plus the metric views. */
+const plusOpts = {
+  schema: "pocplus_icla",
+  views: [...opts.views, "metric_sales", "metric_closing_daily", "metric_appointments_reported", "metric_designers"],
+};
+
+describe("SQL gate, arm B+ (pocplus schema)", () => {
+  const doc = renderMetricViews(loadMetricViewsDoc(), parseAnchor("2026-11-07"));
+  const examples = [...doc.text.matchAll(/```sql\n([\s\S]*?)```/g)].map((m) => m[1].trim());
+  it(`the metric-view documentation has runnable examples (${examples.length}) and no unfilled placeholders`, () => {
+    assert.ok(examples.length >= 4);
+    assert.deepEqual(doc.unfilled, []);
+  });
+  examples.forEach((sql, i) => {
+    it(`accepts documented example ${i + 1}`, () => {
+      const r = gateSql(sql, plusOpts);
+      assert.equal(r.ok, true, r.ok ? "" : `rejected (${r.code}: ${r.reason})`);
+      if (r.ok) assert.ok(r.tables.every((t) => t.toLowerCase().startsWith("metric_")), `tables: ${r.tables.join(", ")}`);
+    });
+  });
+  const VALID_PLUS: [string, string][] = [
+    ["metric view qualified with own schema", "SELECT SUM(sold_amount) FROM pocplus_icla.metric_sales WHERE is_sold = 1"],
+    ["metric + pass-through join", "SELECT a.counting_rule, COUNT(*) FROM metric_appointments_reported a JOIN Salesforce_Data s ON s.`Project ID` = a.matched_project_id GROUP BY a.counting_rule"],
+    ["metric view by month", "SELECT YEAR(event_date) AS y, MONTH(event_date) AS m, LEAST(1, SUM(projects_sold) / NULLIF(SUM(projects_created), 0)) AS c1 FROM metric_closing_daily GROUP BY YEAR(event_date), MONTH(event_date) ORDER BY y, m"],
+    ["roster", "SELECT designer FROM metric_designers WHERE has_projects = 1 ORDER BY designer"],
+    ["exists to metric view", "SELECT COUNT(*) FROM metric_sales s WHERE EXISTS (SELECT 1 FROM metric_appointments_reported a WHERE a.project_name = s.project_name)"],
+  ];
+  for (const [label, sql] of VALID_PLUS) {
+    it(`accepts: ${label}`, () => {
+      const r = gateSql(sql, plusOpts);
+      assert.equal(r.ok, true, r.ok ? "" : `rejected (${r.code}: ${r.reason})`);
+    });
+  }
+  const HOSTILE_PLUS: [string, string][] = [
+    ["Route B schema of the same franchise", "SELECT COUNT(*) FROM poc_icla.Salesforce_Data"],
+    ["Route B schema, backticked", "SELECT COUNT(*) FROM `poc_icla`.`metric_sales`"],
+    ["other franchise B+ schema", "SELECT SUM(sold_amount) FROM pocplus_icau.metric_sales"],
+    ["other franchise B+ in a subquery", "SELECT (SELECT COUNT(*) FROM pocplus_icch.metric_appointments_reported) AS n FROM metric_sales"],
+    ["other franchise B+ via union", "SELECT designer FROM metric_designers UNION SELECT designer FROM pocplus_icau.metric_designers"],
+    ["metric name not in the allowlist", "SELECT * FROM metric_secret"],
+    ["write to a metric view", "UPDATE metric_sales SET amount = 0"],
+  ];
+  for (const [label, sql] of HOSTILE_PLUS) {
+    it(`rejects: ${label}`, () => {
+      const r = gateSql(sql, plusOpts);
+      assert.equal(r.ok, false, `expected rejection for: ${sql}`);
+    });
+  }
+  it("arm B's allowlist (poc schema, no metric views) still rejects the metric views", () => {
+    const r = gateSql("SELECT SUM(sold_amount) FROM metric_sales", opts);
+    assert.equal(r.ok, false);
   });
 });

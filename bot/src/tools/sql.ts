@@ -1,10 +1,12 @@
 /**
  * query_sql: runs gated SQL against the sandbox MySQL (127.0.0.1:3307) as the franchise's own SELECT-only
- * account poc_<ent>.
+ * account: poc_<ent> for arm B (variant "poc", the default) or pocplus_<ent> for arm B+ (variant "pocplus":
+ * the same views passed through, plus the governed metric views). The variant comes from the arm, never from
+ * the model; each (variant, franchise) pair has its own account, password, pool, view list and gate schema.
  *
  * Row-level security on the bot side (the database side is proven by sandbox/rls_test.py):
- *   1. Only the three franchise accounts poc_icla / poc_icch / poc_icau are ever used; the sandbox
- *      administrator account and its password are never read (env.ts drops that key while parsing).
+ *   1. Only the franchise accounts poc_icla / poc_icch / poc_icau (and pocplus_<ent> for B+) are ever used; the
+ *      sandbox administrator account and its password are never read (env.ts drops that key while parsing).
  *   2. The account comes from the caller-supplied franchise, validated against ICLA / ICCH / ICAU. Model output
  *      and tool arguments never choose it: query_sql reads only its `sql` argument.
  *   3. One connection pool per franchise, keyed by franchise, created with that franchise's user and default
@@ -23,7 +25,7 @@
  */
 import fs from "node:fs";
 import mysql from "mysql2/promise";
-import { hasSandboxPassword, sandboxPassword } from "../env";
+import { assertVariant, hasSandboxPassword, sandboxPassword, type SchemaVariant } from "../env";
 import { assertFranchise, type Franchise } from "../franchise";
 import { MAX_ROWS_RETURNED, type QueryResult } from "../format";
 import { SANDBOX_DATA_VERSION } from "../paths";
@@ -36,7 +38,11 @@ const STATEMENT_TIMEOUT_MS = 10_000;
 /** The franchise accounts allow 4 connections each (MAX_USER_CONNECTIONS); the bot uses at most 2. */
 const POOL_SIZE = 2;
 
-export const schemaFor = (entity: string) => `poc_${assertFranchise(entity).toLowerCase()}`;
+export type { SchemaVariant } from "../env";
+/** The franchise's schema (and account name): poc_<ent> for arm B, pocplus_<ent> for arm B+. */
+export const schemaFor = (entity: string, variant: SchemaVariant = "poc") =>
+  `${assertVariant(variant)}_${assertFranchise(entity).toLowerCase()}`;
+const poolKey = (ent: Franchise, variant: SchemaVariant) => `${assertVariant(variant)}:${ent}`;
 
 export const SESSION_SETUP = [
   `SET SESSION max_execution_time = ${STATEMENT_TIMEOUT_MS}`,
@@ -53,19 +59,20 @@ export interface SqlExecution extends QueryResult {
   franchise: Franchise;
 }
 
-const pools = new Map<Franchise, mysql.Pool>();
+const pools = new Map<string, mysql.Pool>();
 
-/** The franchise's pool (created on first use). Exported for the RLS tests. */
-export function poolFor(entity: string): mysql.Pool {
+/** The franchise's pool for one schema variant (created on first use). Exported for the RLS tests. */
+export function poolFor(entity: string, variant: SchemaVariant = "poc"): mysql.Pool {
   const ent = assertFranchise(entity);
-  let pool = pools.get(ent);
+  const key = poolKey(ent, variant);
+  let pool = pools.get(key);
   if (!pool) {
     pool = mysql.createPool({
       host: SANDBOX_HOST,
       port: SANDBOX_PORT,
-      user: schemaFor(ent),
-      password: sandboxPassword(ent),
-      database: schemaFor(ent),
+      user: schemaFor(ent, variant),
+      password: sandboxPassword(ent, variant),
+      database: schemaFor(ent, variant),
       multipleStatements: false,
       connectionLimit: POOL_SIZE,
       maxIdle: POOL_SIZE,
@@ -84,7 +91,7 @@ export function poolFor(entity: string): mysql.Pool {
         conn.query(sql, (err: unknown) => { if (err) conn.destroy(); });
       }
     });
-    pools.set(ent, pool);
+    pools.set(key, pool);
   }
   return pool;
 }
@@ -98,46 +105,48 @@ export async function closePools(): Promise<void> {
 }
 
 /** The franchise's view names, read once per process through its own account (no view definitions needed). */
-const viewCache = new Map<Franchise, Promise<string[]>>();
-export function franchiseViews(entity: string): Promise<string[]> {
+const viewCache = new Map<string, Promise<string[]>>();
+export function franchiseViews(entity: string, variant: SchemaVariant = "poc"): Promise<string[]> {
   const ent = assertFranchise(entity);
-  let p = viewCache.get(ent);
+  const key = poolKey(ent, variant);
+  let p = viewCache.get(key);
   if (!p) {
     p = (async () => {
-      const [rows] = await poolFor(ent).query(
+      const [rows] = await poolFor(ent, variant).query(
         "SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'VIEW'",
-        [schemaFor(ent)]);
+        [schemaFor(ent, variant)]);
       const names = (rows as { name: string }[]).map((r) => r.name);
-      if (!names.length) throw new Error(`no views visible in ${schemaFor(ent)}`);
+      if (!names.length) throw new Error(`no views visible in ${schemaFor(ent, variant)}`);
       return names;
     })();
-    p.catch(() => viewCache.delete(ent));
-    viewCache.set(ent, p);
+    p.catch(() => viewCache.delete(key));
+    viewCache.set(key, p);
   }
   return p;
 }
 
-export function sqlLiveAvailable(entity: string): boolean {
-  return hasSandboxPassword(entity);
+export function sqlLiveAvailable(entity: string, variant: SchemaVariant = "poc"): boolean {
+  return hasSandboxPassword(entity, variant);
 }
 
 /**
- * Gate, then run `sqlIn` as `entity`'s account. `entity` must come from the caller (CLI / harness), never from
- * the model.
+ * Gate, then run `sqlIn` as `entity`'s account of the given schema variant. `entity` must come from the caller
+ * (CLI / harness) and `variant` from the arm, never from the model.
  */
-export async function executeSql(entity: string, sqlIn: string): Promise<SqlExecution> {
+export async function executeSql(entity: string, sqlIn: string, variant: SchemaVariant = "poc"): Promise<SqlExecution> {
   const ent = assertFranchise(entity);
+  assertVariant(variant);
   const started = Date.now();
   let views: string[];
   try {
-    views = await franchiseViews(ent);
+    views = await franchiseViews(ent, variant);
   } catch (err) {
     return {
       error: `Live data unavailable: could not reach the sandbox database (${err instanceof Error ? err.message : String(err)})`,
       latencyMs: Date.now() - started, executed: sqlIn, gate: { ok: false, reason: "sandbox unreachable" }, franchise: ent,
     };
   }
-  const gate = gateSql(sqlIn, { schema: schemaFor(ent), views });
+  const gate = gateSql(sqlIn, { schema: schemaFor(ent, variant), views });
   if (!gate.ok) {
     return {
       error: `Query rejected by the safety gate: ${gate.reason}. Only one read-only SELECT (or WITH ... SELECT) over this franchise's views is allowed.`,
@@ -147,7 +156,7 @@ export async function executeSql(entity: string, sqlIn: string): Promise<SqlExec
 
   const t0 = Date.now();
   try {
-    const [rowsRaw, fields] = await poolFor(ent).query({ sql: gate.sql, rowsAsArray: true });
+    const [rowsRaw, fields] = await poolFor(ent, variant).query({ sql: gate.sql, rowsAsArray: true });
     const latencyMs = Date.now() - t0;
     const fieldList = (fields ?? []) as { name: string }[];
     const columns: string[] = [];

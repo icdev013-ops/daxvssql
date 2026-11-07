@@ -272,8 +272,8 @@ export async function runTurn(input: TurnInput): Promise<TurnRecord> {
   }
 
   // ---------------------------------------------------------------- slow path
-  const visionSystem = arm.buildVision(branch, intent, rules);
-  const fullSystem = arm.buildFull(branch, intent, rules);
+  const visionSystem = arm.buildVision(branch, intent, rules, anchor);
+  const fullSystem = arm.buildFull(branch, intent, rules, anchor);
   prompts.vision = sha256(visionSystem);
   prompts.full = sha256(fullSystem);
   contextLine = arm.contextLine(anchor, branch, liveOk);

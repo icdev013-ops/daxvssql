@@ -11,7 +11,7 @@ import { substitutePlaceholders } from "../context";
 import { formatSqlResultForModel, type QueryResult } from "../format";
 import type { VendorBundle } from "../vendor";
 import { daxLiveAvailable, executeDax } from "./dax";
-import { executeSql, sqlLiveAvailable } from "./sql";
+import { executeSql, sqlLiveAvailable, type SchemaVariant } from "./sql";
 
 export type Dialect = "dax" | "sql";
 
@@ -150,13 +150,17 @@ export const SQL_TOOL_DEFINITIONS = [
   },
 ] as const;
 
-export function sqlTool(): QueryTool {
+/**
+ * query_sql for arm B (variant "poc", the default) or arm B+ (variant "pocplus"). Same definition, formatter and
+ * log shape; only the account, schema and gate allowlist differ, and the variant is fixed by the arm.
+ */
+export function sqlTool(variant: SchemaVariant = "poc"): QueryTool {
   return {
     name: "query_sql",
     dialect: "sql",
     argName: "sql",
     definitions: SQL_TOOL_DEFINITIONS,
-    liveAvailable: sqlLiveAvailable,
+    liveAvailable: (branch) => sqlLiveAvailable(branch, variant),
     async dispatch(name, args, ctx) {
       if (name !== "query_sql") return unknownTool(name, ctx);
       ctx.counters.toolCallsCount += 1;
@@ -173,7 +177,7 @@ export function sqlTool(): QueryTool {
         ].join(" ");
       }
       const { text: finalSql, substituted } = substitutePlaceholders(sql, ctx.anchor);
-      const r = await executeSql(ctx.branch, finalSql);
+      const r = await executeSql(ctx.branch, finalSql, variant);
       ctx.log.push({
         round: ctx.round, dialect: "sql", query: sql, executed: r.executed, ok: !r.error, row_count: r.rowCount,
         truncated: r.truncated, error: r.error, latency_ms: r.latencyMs, placeholders_substituted: substituted,

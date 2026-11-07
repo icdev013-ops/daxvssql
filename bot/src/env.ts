@@ -3,16 +3,27 @@
  * never copied into process.env (so child processes and logs cannot pick them up).
  *
  *   SAAS .env.local  -> OPENROUTER_API_KEY, PBI_* (service principal + dataset ids), UPSTASH_VECTOR_*
- *   daxvssql/.env    -> only SANDBOX_ICLA_PASSWORD, SANDBOX_ICCH_PASSWORD, SANDBOX_ICAU_PASSWORD: the three
- *                       SELECT-only franchise accounts. Every other key in that file (the sandbox
- *                       administrator's) is dropped while parsing and never held in memory.
+ *   daxvssql/.env    -> only SANDBOX_<ENT>_PASSWORD (Route B accounts poc_<ent>) and SANDBOX_<ENT>_PLUS_PASSWORD
+ *                       (Route B+ accounts pocplus_<ent>) for ICLA, ICCH, ICAU: the SELECT-only franchise
+ *                       accounts. Every other key in that file (the sandbox administrator's) is dropped while
+ *                       parsing and never held in memory.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { assertFranchise } from "./franchise";
 import { BOT_DIR, POC_DIR, SAAS_DIR } from "./paths";
 
-const FRANCHISE_PASSWORD_KEY = /^SANDBOX_(ICLA|ICCH|ICAU)_PASSWORD$/;
+const FRANCHISE_PASSWORD_KEY = /^SANDBOX_(ICLA|ICCH|ICAU)(_PLUS)?_PASSWORD$/;
+
+/** Which per-franchise schema family an account belongs to: Route B mirror (poc_) or Route B+ (pocplus_). */
+export type SchemaVariant = "poc" | "pocplus";
+export const SCHEMA_VARIANTS: readonly SchemaVariant[] = ["poc", "pocplus"];
+export function assertVariant(v: unknown): SchemaVariant {
+  if (!(SCHEMA_VARIANTS as readonly unknown[]).includes(v)) throw new Error(`schema variant must be poc or pocplus (got ${JSON.stringify(v)})`);
+  return v as SchemaVariant;
+}
+const passwordKey = (ent: string, variant: SchemaVariant) =>
+  `SANDBOX_${ent}${assertVariant(variant) === "pocplus" ? "_PLUS" : ""}_PASSWORD`;
 
 /** Parse KEY=value lines; `keep` decides which keys are retained (the others are never stored). */
 function parseEnvFile(file: string, keep: (key: string) => boolean = () => true): Record<string, string> {
@@ -75,14 +86,15 @@ export function upstashCredentials(): { url: string; token: string } | null {
 }
 
 /** Password of the franchise's own SELECT-only account. The franchise is validated against the allowlist. */
-export function sandboxPassword(entity: string): string {
+export function sandboxPassword(entity: string, variant: SchemaVariant = "poc"): string {
   const ent = assertFranchise(entity);
-  return need(poc(), `SANDBOX_${ent}_PASSWORD`, "daxvssql/.env (created by `python sandbox/sandbox.py apply-views`)");
+  return need(poc(), passwordKey(ent, variant),
+    `daxvssql/.env (created by \`python sandbox/sandbox.py ${variant === "pocplus" ? "apply-plus" : "apply-views"}\`)`);
 }
 
-export function hasSandboxPassword(entity: string): boolean {
+export function hasSandboxPassword(entity: string, variant: SchemaVariant = "poc"): boolean {
   try {
-    return !!poc()[`SANDBOX_${assertFranchise(entity)}_PASSWORD`];
+    return !!poc()[passwordKey(assertFranchise(entity), variant)];
   } catch {
     return false;
   }

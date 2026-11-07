@@ -8,13 +8,16 @@
  *       shared CONTEXT line, neutral guards, QUERY_LOG markers, business_rules.md + dax_bindings.md.
  *   B   SQL, fair: SQL prompt pair (prompts/sql.ts) over the per-franchise views, query_sql, fast path OFF,
  *       the same CONTEXT line, guards and markers as A, business_rules.md + sql_bindings.md.
- *   B+  stub: B plus curated metric views; built after A and B.
+ *   B+  B plus governed metric views: arm B's arm object (prompts, rules, loop, guards, settings) with query_sql
+ *       bound to the pocplus_<ent> accounts (pass-through views + metric views, sandbox/views_plus) and one section
+ *       documenting the metric views appended after the shared rules in both rounds (prompts/sqlPlus.ts).
  */
 import type { Anchor } from "./context";
 import { fairContextLine, productionContextLine, SALES_BASIS } from "./context";
 import type { MarkerStyle } from "./history";
 import { buildSqlFullSystem, buildSqlVisionSystem, schemaSource } from "./prompts/sql";
 import { renderRules, rulesBlock, type RenderedRules, type RulesTemplates } from "./prompts/rules";
+import { loadMetricViewsDoc, metricViewsBlock, renderMetricViews } from "./prompts/sqlPlus";
 import { daxTool, sqlTool, type QueryTool } from "./tools/index";
 import { datasetRefreshInfo } from "./tools/dax";
 import { sandboxDataVersion } from "./tools/sql";
@@ -51,8 +54,9 @@ export interface ArmRuntime {
   wrapUpPrompt: string;
   guards: GuardTexts;
   basisLineBackstop: boolean;
-  buildVision(branch: string, intent: Intent, rules: RenderedRules | null): string;
-  buildFull(branch: string, intent: Intent, rules: RenderedRules | null): string;
+  /** `anchor` is only read by B+ (to fill the metric-view section's dates); A0, A and B ignore it. */
+  buildVision(branch: string, intent: Intent, rules: RenderedRules | null, anchor?: Anchor): string;
+  buildFull(branch: string, intent: Intent, rules: RenderedRules | null, anchor?: Anchor): string;
   contextLine(anchor: Anchor, branch: string, liveOk: boolean): string;
   dataVersion(branch: string): Promise<Record<string, unknown>>;
   meta(): Record<string, unknown>;
@@ -113,9 +117,7 @@ const rulesMeta = (rules: RulesTemplates | null, dialect: "dax" | "sql") => (rul
 } : { rules: null });
 
 export async function loadArm(id: ArmId, rules: RulesTemplates | null): Promise<ArmRuntime> {
-  if (id === "B+") {
-    throw new Error("arm B+ is a stub: it needs the curated metric views (closing rate, sales by basis, appointments as reported), built after A and B");
-  }
+  if (!ARM_IDS.includes(id)) throw new Error(`unknown arm ${String(id)}`);
   const version: VendorVersion = id === "A0" ? "prod" : "wt";
   const vendor = await loadVendor(version);
 
@@ -149,11 +151,11 @@ export async function loadArm(id: ArmId, rules: RulesTemplates | null): Promise<
     };
   }
 
-  // B
-  const tool = sqlTool();
+  // B (B+ below starts from this same object)
+  const tool = sqlTool(id === "B+" ? "pocplus" : "poc");
   const deps = (b: string) => ({ vendor, salesBasis: SALES_BASIS[b] ?? "created" as const });
-  return {
-    id, label: "B SQL fair (views mirroring the Power BI tables), fast path off", vendor, fastPath: false, marker: "QUERY_LOG",
+  const armB: ArmRuntime = {
+    id: "B", label: "B SQL fair (views mirroring the Power BI tables), fast path off", vendor, fastPath: false, marker: "QUERY_LOG",
     tool, rules, renderRules: (b, a) => (rules ? renderRules(rules, "sql", b, a) : null),
     wrapUpPrompt: neutralWrapUp(vendor), guards: fairGuards(vendor, tool.name),
     basisLineBackstop: vendor.route.HAS_BASIS_LINE_BACKSTOP,
@@ -162,5 +164,19 @@ export async function loadArm(id: ArmId, rules: RulesTemplates | null): Promise<
     contextLine: (a, b, live) => fairContextLine(a, b, vendor.getBranchMeta(b), live),
     dataVersion: async () => dataVersionSql(),
     meta: () => ({ ...codeBaseMeta(vendor), ...rulesMeta(rules, "sql"), schema_source: schemaSource().kind }),
+  };
+  if (id === "B") return armB;
+
+  // B+: arm B plus the governed metric views. Same prompts, rules, loop, guards and settings; query_sql runs as
+  // pocplus_<ent> (gate allowlist = that schema's views); one section appended after the rules in both rounds.
+  const metricDoc = loadMetricViewsDoc();
+  const plus = (a?: Anchor) => metricViewsBlock(renderMetricViews(metricDoc, a));
+  return {
+    ...armB,
+    id: "B+", label: "B+ SQL fair plus governed metric views (pocplus_<ent>), fast path off",
+    buildVision: (b, i, r, a) => armB.buildVision(b, i, r, a) + plus(a),
+    buildFull: (b, i, r, a) => armB.buildFull(b, i, r, a) + plus(a),
+    meta: () => ({ ...armB.meta(), schema_variant: "pocplus", metric_views_doc: "sandbox/views_plus/METRIC_VIEWS.md",
+      metric_views_doc_sha256: metricDoc.sha256 }),
   };
 }

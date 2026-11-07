@@ -12,9 +12,11 @@ import { FRANCHISES } from "../src/franchise";
 import { formatSqlResultForModel, type QueryResult } from "../src/format";
 import { sanitizeHistory, windowHistory } from "../src/history";
 import { requestSettingsFor } from "../src/llm";
-import { VENDOR_DIR } from "../src/paths";
+import { POC_DIR, VENDOR_DIR } from "../src/paths";
 import { loadRulesTemplates } from "../src/prompts/rules";
 import { daxTextToSql, slimSchemaFromDoc } from "../src/prompts/sql";
+import { loadMetricViewsDoc, metricViewsBlock, renderMetricViews } from "../src/prompts/sqlPlus";
+import { sha256 } from "../src/util";
 import { contextPlaceholders, gateCandidate, tryMatchRecipe } from "../src/recipes";
 import { loadVendor, vendorAvailable } from "../src/vendor";
 
@@ -169,8 +171,69 @@ describe("arm prompts build offline for every franchise", { skip }, () => {
       assert.equal(hits, 0, `${path.basename(file)} contains ${hits} name(s) from the private list`);
     }
   });
-  it("B+ is a stub", async () => {
-    await assert.rejects(loadArm("B+", rules), /stub/);
+  it("A and B prompts still match the frozen hashes in PREREGISTRATION.md (dry-run question, anchor 2026-11-07)", async () => {
+    const prereg = fs.readFileSync(path.join(POC_DIR, "PREREGISTRATION.md"), "utf8");
+    const rows = [...prereg.matchAll(/^\| (A|B) \| (ICLA|ICCH|ICAU) \| `([0-9a-f]{16})` \([^)]*\) \| `([0-9a-f]{16})` \([^)]*\) \| `([0-9a-f]{16})` \| `([0-9a-f]{16})` \|$/gm)];
+    assert.equal(rows.length, 6, "PREREGISTRATION.md frozen-prompt table not found");
+    for (const [, armId, f, vision, full, rulesHash, tools] of rows) {
+      const arm = await loadArm(armId as "A" | "B", rules);
+      const q = "How much have we sold this year?";   // the CLI dry-run default the table was taken with
+      const intent = arm.vendor.detectIntent(arm.vendor.extractChartOverride(q).question, false);
+      const rendered = arm.renderRules(f, anchor);
+      assert.equal(sha256(arm.buildVision(f, intent, rendered, anchor)).slice(0, 16), vision, `${armId} ${f} round 0`);
+      assert.equal(sha256(arm.buildFull(f, intent, rendered, anchor)).slice(0, 16), full, `${armId} ${f} round 1+`);
+      assert.equal(rendered!.sha256.slice(0, 16), rulesHash, `${armId} ${f} rules`);
+      assert.equal(sha256(JSON.stringify(arm.tool.definitions)).slice(0, 16), tools, `${armId} ${f} tools`);
+    }
+  });
+});
+
+describe("arm B+ = arm B plus the metric-view section", { skip }, () => {
+  const rules = loadRulesTemplates();
+  const doc = loadMetricViewsDoc();
+  for (const f of FRANCHISES) {
+    it(`${f}: both rounds are B's prompt byte for byte, then the metric-view section`, async () => {
+      const b = await loadArm("B", rules);
+      const p = await loadArm("B+", rules);
+      const intent = b.vendor.detectIntent("what is our closing rate by designer this year and how many appointments", false);
+      const rb = b.renderRules(f, anchor);
+      const rp = p.renderRules(f, anchor);
+      assert.equal(rp!.sha256, rb!.sha256, "same rules");
+      const section = renderMetricViews(doc, anchor);
+      assert.deepEqual(section.unfilled, []);
+      assert.match(section.text, /DATE '2026-11-07'/);
+      assert.equal(p.buildVision(f, intent, rp, anchor), b.buildVision(f, intent, rb, anchor) + metricViewsBlock(section));
+      assert.equal(p.buildFull(f, intent, rp, anchor), b.buildFull(f, intent, rb, anchor) + metricViewsBlock(section));
+    });
+  }
+  it("same tool definition, CONTEXT line, wrap-up, guards, settings and loop flags as B; pocplus schema", async () => {
+    const b = await loadArm("B", rules);
+    const p = await loadArm("B+", rules);
+    assert.equal(p.id, "B+");
+    assert.equal(p.tool.name, "query_sql");
+    assert.equal(JSON.stringify(p.tool.definitions), JSON.stringify(b.tool.definitions));
+    assert.notEqual(p.tool, b.tool);
+    for (const f of FRANCHISES) assert.equal(p.contextLine(anchor, f, true), b.contextLine(anchor, f, true));
+    assert.equal(p.wrapUpPrompt, b.wrapUpPrompt);
+    assert.deepEqual(p.guards, b.guards);
+    assert.equal(p.fastPath, false);
+    assert.equal(p.marker, b.marker);
+    assert.equal(p.basisLineBackstop, b.basisLineBackstop);
+    assert.equal(p.vendor.manifest.combined_sha256, b.vendor.manifest.combined_sha256);
+    assert.equal(p.meta().schema_variant, "pocplus");
+    assert.equal(p.meta().metric_views_doc_sha256, doc.sha256);
+    assert.equal(b.meta().schema_variant, undefined);
+  });
+  it("the metric-view documentation and templates hold no private name", () => {
+    const staff: string[] = rules.staff ?? [];
+    if (!staff.length) return;
+    const dir = path.join(POC_DIR, "sandbox", "views_plus");
+    for (const file of fs.readdirSync(dir, { recursive: true }) as string[]) {
+      if (!fs.statSync(path.join(dir, file)).isFile()) continue;   // views_plus/tools/ is a folder
+      const text = fs.readFileSync(path.join(dir, file), "utf8");
+      assert.equal(staff.filter((n) => text.includes(n)).length, 0, `${file} contains a name from the private list`);
+    }
+    assert.equal(staff.filter((n) => doc.text.includes(n)).length, 0);
   });
 });
 

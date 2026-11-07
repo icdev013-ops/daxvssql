@@ -7,7 +7,7 @@ A standalone TypeScript (Node 22, run with `tsx`) copy of the IC Insightful BOT 
 | `A0` | SAAS commit `d1b6a70` (believed deployed) | `query_dax` | on | none (production prompts) |
 | `A` | SAAS commit `9ef5e4f` (production + 2026-11-07 work) | `query_dax` | off | `rules/business_rules.md` + `rules/dax_bindings.md` |
 | `B` | same loop and guards as A; SQL prompt pair in `src/prompts/sql.ts` | `query_sql` (sandbox views) | off | `rules/business_rules.md` + `rules/sql_bindings.md` |
-| `B+` | stub (curated metric views come later) | | | |
+| `B+` | arm B's prompts, rules, loop and settings, plus one section documenting the governed metric views (`sandbox/views_plus/METRIC_VIEWS.md`, appended after the rules in both rounds) | `query_sql` as `pocplus_<ent>` (B's views passed through + `metric_*` views) | off | same as B |
 
 ## Setup
 
@@ -19,7 +19,7 @@ npm test              # gate, RLS and fidelity tests (the live RLS tests skip if
 npm run typecheck
 ```
 
-Secrets are read at runtime and never printed: `OPENROUTER_API_KEY`, `PBI_*` and `UPSTASH_VECTOR_*` from the chatbot repo's `.env.local`, and only `SANDBOX_ICLA_PASSWORD`, `SANDBOX_ICCH_PASSWORD`, `SANDBOX_ICAU_PASSWORD` from `daxvssql/.env` (every other key in that file is dropped while parsing). Arm B needs the sandbox running with its views (`python sandbox/sandbox.py start`).
+Secrets are read at runtime and never printed: `OPENROUTER_API_KEY`, `PBI_*` and `UPSTASH_VECTOR_*` from the chatbot repo's `.env.local`, and only `SANDBOX_<ENT>_PASSWORD` (arm B) and `SANDBOX_<ENT>_PLUS_PASSWORD` (arm B+) for ICLA, ICCH, ICAU from `daxvssql/.env` (every other key in that file is dropped while parsing). Arm B needs the sandbox running with its views (`python sandbox/sandbox.py start`); arm B+ also needs `python sandbox/sandbox.py apply-plus` (re-run it after every `apply-views`). `POC_DIR` overrides the daxvssql folder (for a git worktree of this repo).
 
 ## Running
 
@@ -58,7 +58,7 @@ Deliberate differences:
 
 ## Row-level security on the SQL route
 
-- Only the three franchise accounts `poc_icla`, `poc_icch`, `poc_icau` are used; the sandbox administrator account is never read or used (static test).
+- Only the franchise accounts `poc_icla`, `poc_icch`, `poc_icau` (arm B) and `pocplus_icla`, `pocplus_icch`, `pocplus_icau` (arm B+) are used; the sandbox administrator account is never read or used (static test). The schema variant is fixed by the arm: B and B+ never share an account, pool or gate allowlist, and the B+ account cannot read the `poc_*` schemas, its own franchise's included (live test).
 - The account comes from the caller's franchise, checked against ICLA / ICCH / ICAU; `query_sql` reads only its `sql` argument, so a franchise or schema argument from the model is ignored (live test).
 - One connection pool per franchise, created with that franchise's user and default schema and never re-pointed; every new connection gets `max_execution_time = 10000`, `TRANSACTION READ ONLY`, `ANSI_QUOTES` and `sql_select_limit = 51`, with `multipleStatements` off (live test).
 - The gate (`src/tools/sqlGate.ts`) allows one SELECT / WITH … SELECT whose tables are that franchise's views (read through its own account) or CTEs; anything schema-qualified to another schema, hints `/*+`, executable comments `/*!`, INTO, locking reads, variables, `SLEEP`/`BENCHMARK`/`GET_LOCK`/`LOAD_FILE` and similar functions, and system schemas are rejected before execution. With the gate bypassed, MySQL itself denies cross-franchise reads (live test).
@@ -73,6 +73,7 @@ Deliberate differences:
 | `src/llm.ts` | OpenRouter client, per-turn settings, stall guard |
 | `src/tools/` | `query_dax`, `query_sql`, the SQL gate, the DAX throttle |
 | `src/prompts/sql.ts`, `sqlMetrics.ts` | Arm B's prompt pair (first draft) and the SQL form of the report's measures |
+| `src/prompts/sqlPlus.ts` | Arm B+'s added section (the metric-view documentation, dates filled from the anchor) |
 | `src/prompts/rules.ts` | Loads and fills the shared rules and bindings |
 | `src/recipes.ts` | A0's recipe matcher |
 | `test/` | `gate.test.ts`, `rls.test.ts`, `fidelity.test.ts` |
