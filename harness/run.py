@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
@@ -34,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GOLD = ROOT / "gold"
 PRIV = GOLD / "private"
 RUNS = ROOT / "runs"
-BOT = ROOT / "bot"
+BOT = Path(os.environ["POC_BOT_DIR"]) if os.environ.get("POC_BOT_DIR") else ROOT / "bot"
 NPX = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
 SOURCE = {"A": "dax", "A0": "dax", "B": "sql", "B+": "sql"}
 
@@ -137,6 +138,8 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--score-only", action="store_true")
+    ap.add_argument("--reuse-refs", default="", help="reuse the cases and SQL references of an earlier batch tag "
+                    "(SQL-only arms: the sandbox is frozen, so no reference pass and no drift check)")
     a = ap.parse_args()
 
     RUNS.mkdir(exist_ok=True)
@@ -154,9 +157,17 @@ def main() -> None:
         ids |= {t["id"] for t in tpls.values() if t.get("conversation") in convs and convs}
         sel = ["--splits", a.splits] + (["--ids", ",".join(sorted(ids))] if ids else []) + \
               (["--franchises", a.franchises] if a.franchises else [])
-        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", a.tag, "--no-probes",
-            "--dax-rpm", str(a.dax_rpm)] + sel)
-        calib = load_jsonl(PRIV / f"calibration_{a.anchor}_{a.tag}.jsonl")
+        if a.reuse_refs:
+            if any(SOURCE.get(x) == "dax" for x in a.arms.split(",")):
+                sys.exit("--reuse-refs is only for SQL arms (B, B+): DAX references drift with the datasets")
+            src_tag = a.reuse_refs
+            calib = [r for r in load_jsonl(PRIV / f"calibration_{a.anchor}_{src_tag}.jsonl")
+                     if r.get("split") in splits and (not ids or r.get("template_id") in ids)]
+            shutil.copyfile(PRIV / f"refs_{a.anchor}_{src_tag}.jsonl", PRIV / f"refs_{a.anchor}_{a.tag}.jsonl")
+        else:
+            sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", a.tag, "--no-probes",
+                "--dax-rpm", str(a.dax_rpm)] + sel)
+            calib = load_jsonl(PRIV / f"calibration_{a.anchor}_{a.tag}.jsonl")
         n, skipped = build_cases(calib, tpls, a.anchor, RUNS / f"{a.tag}_cases.jsonl")
         print(f"cases: {n} usable, {skipped} set aside because SQL and DAX references disagree")
         arms = a.arms.split(",")
@@ -169,9 +180,12 @@ def main() -> None:
                     str(RUNS / f"{a.tag}_cases.jsonl"), "--run-id", rid, "--run-index", str(r),
                     "--concurrency", str(a.concurrency)], cwd=BOT)
                 run_files.append(str(RUNS / f"{rid}.jsonl"))
-        sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", f"{a.tag}_post", "--no-probes",
-            "--dax-rpm", str(a.dax_rpm)] + sel)
-        moved = drift(PRIV / f"refs_{a.anchor}_{a.tag}.jsonl", PRIV / f"refs_{a.anchor}_{a.tag}_post.jsonl")
+        if a.reuse_refs:
+            moved = set()   # frozen sandbox: SQL references cannot move
+        else:
+            sh([sys.executable, "gold/validate.py", "--anchor", a.anchor, "--tag", f"{a.tag}_post", "--no-probes",
+                "--dax-rpm", str(a.dax_rpm)] + sel)
+            moved = drift(PRIV / f"refs_{a.anchor}_{a.tag}.jsonl", PRIV / f"refs_{a.anchor}_{a.tag}_post.jsonl")
         meta = {"anchor": a.anchor, "tag": a.tag, "arms": arms, "runs": a.runs, "run_files": run_files,
                 "cases": n, "gold_disagree_skipped": skipped, "drifted": sorted(map(list, moved))}
         meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
