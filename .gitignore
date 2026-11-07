@@ -1,0 +1,36 @@
+# --- Secrets -------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.token*.json
+
+# --- Local data copies (franchise data, personal data) --------------------
+# The sandbox MySQL datadir, dumps and everything a run produces stay local.
+.sandbox/
+dumps/
+*.sql.gz
+*.dump
+runs/
+results/
+*.jsonl
+
+# Gold-set answers and anything holding real franchise numbers or names
+gold/private/
+gold/**/*.answers.*
+adjudication/
+
+# Copies of the production chatbot code (extracted at runtime from the SAAS repo;
+# may hold staff/designer names) and runtime name snapshots
+.vendor/
+bot/.vendor/
+private/
+
+# --- Tooling ------------------------------------------------------------
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
+Thumbs.db
