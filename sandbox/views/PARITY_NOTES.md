@@ -29,7 +29,7 @@ The views in this folder reproduce what the ICLA, ICCH and ICAU models import: t
 | `Lead Source Channels` | 64 | 64 | 64 |
 | `Source_Sort` | 64 | 64 | 64 |
 | `LS Group Sort` | 3 | 3 | 3 |
-| `dim_entity` | 9 | 9 | 9 |
+| `dim_entity` | 1 | 1 | 1 |
 | `report_scorecard` | 8,478 | 7,776 | 8,478 |
 | `report_designer_leaderboard` | 594 | 980 | 914 |
 | `report_lead_source_roi` | 303 | 375 | 364 |
@@ -38,7 +38,7 @@ The views in this folder reproduce what the ICLA, ICCH and ICAU models import: t
 | `report_appointment_funnel` | 465 | 426 | 484 |
 | `Projects Part List` | 11,557 | n/a | n/a |
 
-`DateTable`, `SoldDateTable`, `Lead Source Channels`, `Source_Sort`, `LS Group Sort` and `dim_entity` are tenant-agnostic and identical in every schema, as in the models.
+`DateTable`, `SoldDateTable`, `Lead Source Channels`, `Source_Sort` and `LS Group Sort` are tenant-agnostic and identical in every schema, as in the models. `dim_entity` is filtered to the franchise (see gap 18).
 
 ## Where the views cannot match the model exactly
 
@@ -66,7 +66,7 @@ The views in this folder reproduce what the ICLA, ICCH and ICAU models import: t
 ### Franchise differences and duplication
 16. **ICAU `Additional Lead Source`.** Only the ICAU model keeps this column (Gold `Other Lead Source`, filled on 1,844 of 9,109 ICAU rows). The simplest faithful approach is an override: `20_salesforce_data.only_ICAU.sql` re-creates `Salesforce_Data` for ICAU with the shared definition plus that column in the model's position. The cost is a second copy of the `Salesforce_Data` definition, which has to be kept in step with `10_mirror.sql` (both were generated from the TMDL in one pass and diffed: the only difference is that line). ICLA and ICCH Gold rows also carry `Other Lead Source` (591 and 1,087 filled) but their models drop it, so their views do too.
 17. **ICLA `Projects Part List`** is in `30_projects_part_list.only_ICLA.sql` with its two ICLA-only relationships.
-18. **`dim_entity` lists all nine entity codes** (including DEMO, the offboarded ICMA and ICMN) with display names and regions, because the model imports the table unfiltered. It holds no fact data, so it was excluded from the entity-leak check.
+18. **`dim_entity` is filtered to the franchise's own row (deliberate deviation, 2026-11-07).** The model imports all nine entity codes unfiltered. For row-level security every view a franchise account can read holds only that franchise's rows, so the view keeps one row. Only a question like "which franchises exist?" is affected. Enforced by `sandbox/rls_test.py`.
 
 ### Query-time computation
 19. **Derived tables are computed per query.** Power BI materialises `Lead Milestones`, the distinct lookups and `SoldDateTable` at refresh; the views compute them each time they are read. On this data a full `Lead Milestones` scan takes about 0.1 s and every other view about 0.02 s or less, far inside the sandbox's 15 s `max_execution_time`, so this affects latency only, not results. Filters on the date-cast columns cannot use Gold's (entity, datetime) index ranges; also a latency-only effect at these volumes.

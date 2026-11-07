@@ -24,11 +24,19 @@ Franchises in scope: ICLA, ICCH, ICAU.
 
 Secrets (`.env`), the sandbox datadir and dumps (`.sandbox/`, `dumps/`), run logs (`runs/`, `*.jsonl`), gold answers with real numbers, and vendored copies of the production chatbot code (`bot/.vendor/`, which can hold staff names). See `.gitignore`.
 
-## Isolation
+## Row-level security (Route B)
 
-- **Franchises:** each franchise has its own schema of DEFINER views with a literal entity filter, and its own SELECT-only account (`poc_icla`, `poc_icch`, `poc_icau`) that can see only that schema.
-- **Bot connections:** the bot picks the account from the franchise the caller supplies, never from model output.
-- **Query gate:** every SQL statement passes a parser-based gate before it runs (single SELECT, allowlisted views, no hints, variables, OUTFILE or sleep functions). Each session also sets a time limit, read-only mode and `ANSI_QUOTES`.
+Route A gets franchise isolation for free: each franchise has its own Power BI semantic model. MySQL has no native row-level security, and Route B's data sits in one shared database, so isolation is built in layers. Each layer is enforced by a machine test, not by the prompt.
+
+| Layer | What it guarantees | Proven by |
+|---|---|---|
+| Views | Each franchise has its own schema (`poc_icla`, `poc_icch`, `poc_icau`) of `SQL SECURITY DEFINER` views. Every view that reads a tenant table carries a literal `entity = '<ENT>'` filter, and no other franchise's code. A view that reads no tenant table must be on a reviewed tenant-free list (date tables, lead-source taxonomy). | `rls_test.py` A |
+| Accounts | One account per franchise, holding exactly `USAGE` + `SELECT` on its own schema: no `SHOW VIEW`, no global privileges, no other account reaching a `poc_*` schema. | `rls_test.py` B |
+| Data | Through each account, every `entity` column holds only that franchise. None of the 145k Salesforce record ids belonging to any other franchise (including DEMO, the offboarded ICMA and UNMAPPED rows) appears in any text column of any view. | `rls_test.py` C |
+| Privileges | Through each account these all fail or return nothing:<br>• reads: base schemas, other franchise schemas, `mysql.*`, statement history, the catalog of other schemas, view definitions, other sessions, `LOAD_FILE`<br>• writes: DDL, DML, temporary tables, `OUTFILE`, `SET GLOBAL`<br>A user variable can't widen a view. | `rls_test.py` D |
+| Bot | The SQL tool picks the account from the franchise the signed-in caller supplies, never from model output. Each franchise has its own connection pool. A parser-based gate allows a single SELECT/WITH over that franchise's views only, with no hints, variables, `OUTFILE` or sleep functions. Each session sets a time limit, read-only mode and `ANSI_QUOTES`. | `bot/test/gate.test.ts`, safety battery |
+
+Run `python sandbox/rls_test.py` after every `refresh` or `apply-views`. Any failure blocks scored runs.
 
 ## Quick start
 

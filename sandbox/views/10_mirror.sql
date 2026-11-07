@@ -285,8 +285,10 @@ SELECT
 FROM icall_gold.dim_lead_sources
 GROUP BY `Lead Source Group`;
 
--- dim_entity: franchise master list. The model imports ALL rows (no entity filter), so this view does too.
--- M: icall_gold.dim_entity, no steps. Columns renamed to Title Case in the model.
+-- dim_entity: franchise master list. M: icall_gold.dim_entity, no steps; columns renamed to Title Case.
+-- DELIBERATE DEVIATION (row-level security, 2026-11-07): the model imports all 9 rows, but every view a
+-- franchise account can read must hold only that franchise's rows, so this view is filtered to {ENT}.
+-- See PARITY_NOTES.md and sandbox/rls_test.py.
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW `{SCHEMA}`.`dim_entity` AS
 SELECT
   `entity`,
@@ -295,7 +297,8 @@ SELECT
   `is_active` AS `Is Active`,
   `entity_sk`,
   `Data Ingested At`
-FROM icall_gold.dim_entity;
+FROM icall_gold.dim_entity
+WHERE `entity` = '{ENT}';
 
 -- Lead Milestones: one row per lead, journey milestones from the lead status history.
 -- M: native SQL query (MySQL.Database ... [Query = ...]) reused verbatim with the entity literal,
