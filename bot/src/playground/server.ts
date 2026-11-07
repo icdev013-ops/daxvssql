@@ -8,6 +8,7 @@
  * the same runTurn() the CLI and the scored runs use, and is logged to
  * runs/playground-<date>.jsonl (gitignored).
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -78,9 +79,41 @@ function send(res: http.ServerResponse, code: number, body: unknown, type = "app
   res.end(type === "application/json" ? JSON.stringify(body) : String(body));
 }
 
+/** Optional access key (PLAYGROUND_TOKEN). Required whenever the page is exposed through a tunnel:
+ *  open /?key=<token> once; the key is kept in an HttpOnly cookie and stripped from the address bar. */
+const TOKEN = process.env.PLAYGROUND_TOKEN ?? "";
+function keyOk(candidate: string | undefined): boolean {
+  if (!TOKEN) return true;
+  if (!candidate) return false;
+  const a = Buffer.from(candidate), b = Buffer.from(TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function cookieKey(req: http.IncomingMessage): string | undefined {
+  const m = /(?:^|;\s*)pg_key=([^;]+)/.exec(req.headers.cookie ?? "");
+  return m ? decodeURIComponent(m[1]) : undefined;
+}
+
 const server = http.createServer(async (req, res) => {
   const addr = req.socket.remoteAddress ?? "";
   if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(addr)) return send(res, 403, { error: "local only" });
+  const url = new URL(req.url ?? "/", "http://local");
+  if (TOKEN) {
+    const qk = url.searchParams.get("key") ?? undefined;
+    if (req.method === "GET" && url.pathname === "/" && qk && keyOk(qk)) {
+      const secure = req.headers["x-forwarded-proto"] === "https" || !!req.headers["cf-connecting-ip"];
+      res.writeHead(302, {
+        Location: "/",
+        "Set-Cookie": `pg_key=${encodeURIComponent(qk)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${secure ? "; Secure" : ""}`,
+        "Cache-Control": "no-store",
+      });
+      return res.end();
+    }
+    if (!keyOk(cookieKey(req) ?? (req.headers["x-pg-key"] as string | undefined))) {
+      return send(res, 401, "<!doctype html><meta name=viewport content='width=device-width'><title>Locked</title>" +
+        "<p style='font:16px system-ui;padding:24px'>This test page needs its access link.</p>", "text/html; charset=utf-8");
+    }
+  }
+  req.url = url.pathname;
   try {
     if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
       return send(res, 200, fs.readFileSync(PAGE, "utf8"), "text/html; charset=utf-8");
