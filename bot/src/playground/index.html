@@ -76,7 +76,8 @@
   </form>
 </footer>
 <script>
-const NAMES = { A: "Route A · DAX (Power BI model)", B: "Route B · SQL (MySQL views)", A0: "A0 · production as-is" };
+if (location.search.includes("key=")) history.replaceState(null, "", location.pathname);
+const NAMES ={ A: "Route A · DAX (Power BI model)", B: "Route B · SQL (MySQL views)", A0: "A0 · production as-is" };
 const state = { arms: [], hist: {} };
 const $ = (id) => document.getElementById(id);
 

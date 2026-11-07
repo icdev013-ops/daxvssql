@@ -100,13 +100,17 @@ const server = http.createServer(async (req, res) => {
   if (TOKEN) {
     const qk = url.searchParams.get("key") ?? undefined;
     if (req.method === "GET" && url.pathname === "/" && qk && keyOk(qk)) {
+      // Serve the page directly (no redirect): a SameSite cookie set during a redirect that began in
+      // another app (chat, mail) is not sent on the redirected request on mobile browsers. The page
+      // strips ?key= from the address bar itself. Lax still blocks cross-site POSTs.
       const secure = req.headers["x-forwarded-proto"] === "https" || !!req.headers["cf-connecting-ip"];
-      res.writeHead(302, {
-        Location: "/",
-        "Set-Cookie": `pg_key=${encodeURIComponent(qk)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${secure ? "; Secure" : ""}`,
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": `pg_key=${encodeURIComponent(qk)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${secure ? "; Secure" : ""}`,
         "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
       });
-      return res.end();
+      return res.end(fs.readFileSync(PAGE, "utf8"));
     }
     if (!keyOk(cookieKey(req) ?? (req.headers["x-pg-key"] as string | undefined))) {
       return send(res, 401, "<!doctype html><meta name=viewport content='width=device-width'><title>Locked</title>" +
